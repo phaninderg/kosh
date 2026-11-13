@@ -1,0 +1,566 @@
+"""FastAPI app. Reads via read-only connections; writes only through finance.ledger / finance.importer."""
+
+from __future__ import annotations
+
+import os
+import re
+import secrets
+import tempfile
+from datetime import date
+from decimal import Decimal
+from pathlib import Path
+from urllib.parse import urlparse
+
+from markupsafe import Markup
+from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+
+from config import BACKUP_DIR, CAS_PASSWORD, DB_PATH, MAIL_CONFIG_PATH, PUBLIC_PORT, UI_HOST, UI_PORT
+from finance import analytics
+from finance.db import connect_ro
+from finance.jobs import ACTION_INFO, JobManager
+
+HERE = Path(__file__).parent
+COOKIE = f"kosh_session_{PUBLIC_PORT}"        # browsers share cookies across ports of one host; the port in the name keeps other localhost services' from clashing
+
+
+def today() -> date:
+    """Today's date, asked in one place so a test can pin it."""
+    return date.today()
+
+
+def inr(v, dp: int = 0) -> str:
+    """Indian digit grouping: 12,34,567."""
+    if v is None:
+        return "—"
+    d = Decimal(str(v))
+    neg, d = d < 0, abs(d)
+    whole, _, frac = f"{d:.{dp}f}".partition(".")
+    if len(whole) > 3:
+        head = re.sub(r"(\d)(?=(\d\d)+$)", r"\1,", whole[:-3])
+        whole = f"{head},{whole[-3:]}"
+    return f"{'-' if neg else ''}₹{whole}{'.' + frac if frac else ''}"
+
+
+def ts(value) -> Markup:
+    """UTC timestamp from the DB; the browser rewrites it into local time (base.html)."""
+    if not value:
+        return Markup("—")
+    iso = str(value).replace(" ", "T") + ("Z" if not str(value).endswith("Z") else "")
+    return Markup('<time class="ts" datetime="{}">{} UTC</time>').format(iso, str(value))
+
+
+def create_app(token: str, db_path: str = DB_PATH, jobs: JobManager | None = None,
+               mail_config_path: str = MAIL_CONFIG_PATH, imap_connect=None) -> FastAPI:
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    templates = Jinja2Templates(directory=str(HERE / "templates"))
+    templates.env.filters["inr"] = inr
+    templates.env.filters["ts"] = ts
+    jobs = jobs or JobManager()
+    allowed_hosts = {f"{h}:{p}" for h in (UI_HOST, "localhost", "127.0.0.1") for p in (UI_PORT, PUBLIC_PORT)} | {"testserver"}
+
+    app.mount("/static", StaticFiles(directory=str(HERE / "static")), name="static")
+
+    @app.middleware("http")
+    async def guard(request: Request, call_next):
+        if request.headers.get("host", "") not in allowed_hosts:          # DNS-rebinding defence
+            return PlainTextResponse("bad host", status_code=400)
+        if request.method == "POST":                                    # cross-site form posts
+            origin = request.headers.get("origin") or request.headers.get("referer")
+            if not origin or urlparse(origin).netloc != request.headers["host"]:      # a browser always sends one of them
+                return PlainTextResponse("bad origin", status_code=403)
+        supplied = request.query_params.get("token")
+        if supplied and secrets.compare_digest(supplied, token):
+            resp = RedirectResponse(request.url.path, status_code=303)
+            resp.set_cookie(COOKIE, token, httponly=True, samesite="strict")
+            return resp
+        if not secrets.compare_digest(request.cookies.get(COOKIE, ""), token):
+            return PlainTextResponse("Open the URL printed by `python main.py ui` (it carries the access token).",
+                                     status_code=401)
+        return await call_next(request)
+
+    def open_review_count() -> int:
+        conn = connect_ro(db_path)
+        try:
+            return len(analytics.open_review_items(conn))
+        finally:
+            conn.close()
+
+    def render(request: Request, name: str, **ctx):
+        return templates.TemplateResponse(request, name, {"mb": make_labeler(), "review_open": open_review_count(), **ctx})
+
+    # ── overview (the landing page) and the mutual fund portfolio ────────────────
+
+    @app.get("/", response_class=HTMLResponse)
+    def overview(request: Request):
+        conn = connect_ro(db_path)
+        try:
+            data = analytics.overview(conn, today())
+            review_count = len(analytics.open_review_items(conn))
+        finally:
+            conn.close()
+        return render(request, "overview.html", ov=data, review_count=review_count, page="home")
+
+    @app.get("/portfolio", response_class=HTMLResponse)
+    def home(request: Request):
+        conn = connect_ro(db_path)
+        try:
+            view = analytics.portfolio(conn)
+            redeemed = analytics.redemptions(conn)
+            open_items = analytics.open_review_items(conn)
+        finally:
+            conn.close()
+        review_count = len(open_items)
+        unreliable = sum(i["kind"] in ("duplicate_folio", "duplicate_txns") for i in open_items)
+        return render(request, "portfolio.html", view=view, review_count=review_count, unreliable=unreliable, page="portfolio", redeemed=redeemed,
+                      categories=analytics.share_breakdown(view.by_category),
+                      cat_chart=[[k, float(pct)] for k, _, pct in analytics.share_breakdown(view.by_category)],
+                      amcs=analytics.share_breakdown(view.by_amc, keep=1000))
+
+    @app.get("/transactions", response_class=HTMLResponse)
+    def transactions(request: Request, q: str = "", kind: str = "", date_from: str = "", date_to: str = "",
+                     account_type: str = "", sort: str = "date_desc"):
+        conn = connect_ro(db_path)
+        try:
+            rows = analytics.search_transactions(conn, text=q, kind=kind, date_from=date_from, date_to=date_to,
+                                                 account_type=account_type, sort=sort)
+            kinds = analytics.txn_kinds(conn, account_type)
+            types = analytics.account_types(conn)
+        finally:
+            conn.close()
+        return render(request, "transactions.html", rows=rows, kinds=kinds, types=types, page="txns",
+                      q=q, kind=kind, date_from=date_from, date_to=date_to, account_type=account_type,
+                      sort=sort if sort in analytics.TXN_SORTS else "date_desc", sorts=analytics.TXN_SORTS)
+
+    @app.get("/accounts", response_class=HTMLResponse)
+    def accounts_page(request: Request):
+        conn = connect_ro(db_path)
+        try:
+            overview = analytics.accounts_overview(conn)
+            flow = analytics.cash_flow_by_month(conn)
+            card_flow = analytics.card_spending_by_month(conn)
+            nps = analytics.nps_overview(conn)
+        finally:
+            conn.close()
+        return render(request, "accounts.html", page="accounts", flow=flow, card_flow=card_flow, nps=nps, **overview)
+
+    # ── import ────────────────────────────────────────────────────────────────
+
+    from finance.importer import STATEMENT_TYPES, TYPE_LABELS
+    PARSER_LABELS = {"cas": "mutual fund CAS", "icici": "ICICI account statement", "icici_card": "ICICI credit card",
+                     "hdfc_card": "HDFC credit card", "axis_card": "Axis credit card", "tata_card": "Tata credit card",
+                     "nps": "NPS statement"}
+    PARSER_CHOICES = [(k, TYPE_LABELS[k] + ("" if STATEMENT_TYPES[k] else " (not supported yet)")) for k in STATEMENT_TYPES]
+
+    def import_context(**extra):
+        conn = connect_ro(db_path)
+        try:
+            docs = analytics.list_documents(conn, source="upload")         # manual imports only; mail has Documents
+        finally:
+            conn.close()
+        return dict(docs=docs, page="import", outcomes=[], summary=None, choices=PARSER_CHOICES,
+                    selected="bank", parser_labels=PARSER_LABELS, **extra)
+
+    @app.get("/import", response_class=HTMLResponse)
+    def import_page(request: Request):
+        return render(request, "import.html", **import_context())
+
+    MAX_UPLOAD_FILES = 25
+
+    @app.post("/import", response_class=HTMLResponse)
+    def import_upload(request: Request, file: list[UploadFile] = File(...), password: str = Form(""),
+                      parser: str = Form("bank")):
+        from finance.importer import import_any
+        from finance.passwords import DecryptAgent, Identity
+        if parser not in STATEMENT_TYPES:
+            parser = "bank"
+        cfg = load_config(mail_config_path)
+        templates = list(dict.fromkeys(t for a in cfg.accounts for r in a.senders for t in r.templates))
+        typed = [x for x in (password, CAS_PASSWORD) if x]
+
+        def import_one(upload: UploadFile) -> dict:
+            """One file: unlock it the way mailbox sync does (a typed password first, then the Identity templates from
+            your sender rules and your CAS password), then import it. Passwords stay in memory; nothing is stored or echoed."""
+            out = {"name": upload.filename or "statement.pdf", "result": None, "used": None, "error": None}
+            data = upload.file.read(50 * 1024 * 1024 + 1)
+            if len(data) > 50 * 1024 * 1024 or not data.startswith(b"%PDF"):
+                out["error"] = "Not a PDF (or larger than 50 MB)."
+                return out
+            try:
+                unlocked = DecryptAgent(Identity()).unlock(data, "upload", templates, priority=typed)
+            except Exception:                    # not something pdfminer can inspect: let the parser say what is wrong
+                unlocked = None
+            if unlocked is not None and not unlocked.ok:
+                out["error"] = unlocked.reason + " Type the PDF password above."
+                return out
+            pw = unlocked.password.get_secret_value() if unlocked and unlocked.password else (password or CAS_PASSWORD or None)
+            fd, tmp = tempfile.mkstemp(suffix=".pdf")
+            try:
+                with os.fdopen(fd, "wb") as f:
+                    f.write(data)
+                out["result"], out["used"] = import_any(tmp, parser, pw, db_path=db_path, original_name=upload.filename)
+            except Exception as exc:
+                out["error"] = f"Import failed: {type(exc).__name__}: {exc}"
+            finally:
+                Path(tmp).unlink(missing_ok=True)
+            return out
+
+        uploads = file[:MAX_UPLOAD_FILES]
+        outcomes = [import_one(u) for u in uploads]
+        if len(file) > MAX_UPLOAD_FILES:
+            outcomes.append({"name": "", "result": None, "used": None,
+                             "error": f"Only the first {MAX_UPLOAD_FILES} files were imported; upload the rest again."})
+        summary = {"imported": sum(1 for o in outcomes if o["result"] and o["result"].status != "duplicate"),
+                   "known": sum(1 for o in outcomes if o["result"] and o["result"].status == "duplicate"),
+                   "failed": sum(1 for o in outcomes if o["error"])}
+        ctx = import_context()
+        ctx.update(outcomes=outcomes, summary=summary, selected=parser)
+        return render(request, "import.html", **ctx)
+
+    PROVIDER_LABEL = {"gmail": "Gmail", "yahoo": "Yahoo Mail"}
+
+    def make_labeler():
+        """Friendly mailbox names for templates: 'Gmail · gmail-main'. Reads the config once per page."""
+        cfg = load_config(mail_config_path)
+
+        def label(name: str, folder: str = "", detail: bool = False) -> str:
+            if name == "upload":
+                return "Manual upload"
+            if not name:
+                return "—"
+            acct = cfg.account(name)
+            provider = (PROVIDER_LABEL.get(acct.provider) or acct.imap_host) if acct else "Mailbox (removed)"
+            text = f"{provider} · {name}"
+            if detail and acct:
+                text = f"{provider} · {acct.username} ({name})"
+            if folder:
+                text += f" · {'Inbox' if folder.upper() == 'INBOX' else folder}"
+            return text
+        return label
+
+    # ── documents: which email / file produced what ───────────────────────────
+
+    @app.get("/documents", response_class=HTMLResponse)
+    def documents_page(request: Request, q: str = "", status: str = "", account: str = ""):
+        conn = connect_ro(db_path)
+        try:
+            docs = analytics.list_documents(conn, 300, status=status, account=account, q=q)
+            statuses, accounts = analytics.document_filters(conn)
+        finally:
+            conn.close()
+        return render(request, "documents.html", docs=docs, statuses=statuses, accounts=accounts, page="documents",
+                      q=q, status=status, account=account)
+
+    # ── mail sync runs (started from the Mailboxes page) ────────────────────────
+
+    @app.get("/jobs/{job_id}", response_class=HTMLResponse)
+    def job_page(request: Request, job_id: str):
+        meta = jobs.get(job_id)
+        if not meta:
+            return PlainTextResponse("no such job", status_code=404)
+        return render(request, "job.html", job=meta, log=jobs.log(job_id), page="mailboxes")
+
+    @app.get("/jobs/{job_id}/log", response_class=HTMLResponse)
+    def job_log(request: Request, job_id: str):
+        meta = jobs.get(job_id)
+        if not meta:
+            return PlainTextResponse("no such job", status_code=404)
+        return templates.TemplateResponse(request, "_joblog.html", {"job": meta, "log": jobs.log(job_id)})
+
+    # ── mailboxes & identity (secrets are write-only: stored in the keyring, never shown) ──
+
+    from finance import secrets as secret_store
+    from finance.mailconfig import (MailboxAccount, default_cas_rules, format_sender_lines, load_config,
+                                    parse_sender_lines, save_config)
+    from finance.passwords import validate_template
+
+    def mailboxes_ctx(request: Request, *, edit: str = "", flash: str = "", error: str = "", form: dict | None = None):
+        cfg = load_config(mail_config_path)
+        conn = connect_ro(db_path)
+        try:
+            states = {r["account"]: r for r in conn.execute("SELECT * FROM imap_state")}
+        finally:
+            conn.close()
+        accounts = [dict(a=a, password_set=secret_store.has_secret(a.secret_key),
+                         last_sync=(states.get(a.name) or {"last_sync": None})["last_sync"] if a.name in states else None,
+                         senders=format_sender_lines(a.senders)) for a in cfg.accounts]
+        current = next((x for x in accounts if x["a"].name == edit), None)
+        form = form or ({"name": current["a"].name, "provider": current["a"].provider,
+                         "username": current["a"].username, "host": current["a"].host or "",
+                         "folder": current["a"].folder, "lookback_days": current["a"].lookback_days,
+                         "senders": current["senders"], "require_auth": current["a"].require_auth}
+                        if current else {"name": "", "provider": "gmail", "username": "", "host": "",
+                                         "folder": "INBOX", "lookback_days": 365,
+                                         "senders": format_sender_lines(default_cas_rules()), "require_auth": True})
+        return dict(page="mailboxes", accounts=accounts, flash=flash, error=error, form=form, editing=bool(current),
+                    running=jobs.running())
+
+    @app.get("/mailboxes", response_class=HTMLResponse)
+    def mailboxes_page(request: Request, edit: str = "", flash: str = ""):
+        return render(request, "mailboxes.html", **mailboxes_ctx(request, edit=edit, flash=flash))
+
+    @app.post("/mailboxes/save", response_class=HTMLResponse)
+    def mailboxes_save(request: Request, name: str = Form(...), provider: str = Form(...), username: str = Form(...),
+                       host: str = Form(""), folder: str = Form("INBOX"), lookback_days: int = Form(365),
+                       senders: str = Form(""), app_password: str = Form(""), require_auth: str = Form("")):
+        form = dict(name=name, provider=provider, username=username, host=host, folder=folder,
+                    lookback_days=lookback_days, senders=senders, require_auth=bool(require_auth))
+        try:
+            acct = MailboxAccount(name=name, provider=provider, username=username.strip(), host=host.strip() or None,
+                                  folder=folder.strip() or "INBOX", lookback_days=lookback_days,
+                                  require_auth=bool(require_auth), senders=parse_sender_lines(senders))
+            acct.imap_host
+            if not acct.senders:
+                raise ValueError("add at least one allowed sender")
+            cfg = load_config(mail_config_path)
+            cfg.accounts = [a for a in cfg.accounts if a.name != acct.name] + [acct]
+            if app_password:
+                secret_store.set_secret(acct.secret_key, app_password.strip())
+            elif not secret_store.has_secret(acct.secret_key):
+                raise ValueError("enter the app password (it is stored in your OS keyring, never in a file)")
+            save_config(cfg, mail_config_path)
+        except ValueError as exc:
+            return render(request, "mailboxes.html", **mailboxes_ctx(request, error=str(exc), form=form))
+        return RedirectResponse(f"/mailboxes?flash=Saved+{acct.name}", status_code=303)
+
+    @app.post("/mailboxes/{name}/test", response_class=HTMLResponse)
+    def mailboxes_test(request: Request, name: str):
+        from finance.sources.base import MailboxError
+        from finance.sources.imap import ImapSource, _default_connect
+        acct = load_config(mail_config_path).account(name)
+        if not acct:
+            return PlainTextResponse("no such mailbox", status_code=404)
+
+        class _NoState:
+            def get(self, *a): return None
+            def set(self, *a): pass
+        try:
+            n = ImapSource(acct, _NoState(), connect=imap_connect or _default_connect).check()
+            return render(request, "mailboxes.html", **mailboxes_ctx(
+                request, flash=f"{name}: connected read-only; {n} message(s) from your allowed senders are visible."))
+        except MailboxError as exc:
+            return render(request, "mailboxes.html", **mailboxes_ctx(request, error=f"{name}: {exc}"))
+
+    @app.post("/mailboxes/{name}/delete")
+    def mailboxes_delete(name: str):
+        cfg = load_config(mail_config_path)
+        acct = cfg.account(name)
+        if acct:
+            cfg.accounts = [a for a in cfg.accounts if a.name != name]
+            save_config(cfg, mail_config_path)
+            secret_store.delete_secret(acct.secret_key)
+        return RedirectResponse(f"/mailboxes?flash=Removed+{name}+(imported+data+is+kept)", status_code=303)
+
+    @app.post("/mailboxes/{name}/sync")
+    def mailboxes_sync(name: str):
+        try:
+            return RedirectResponse(f"/jobs/{jobs.start('sync', {'accounts': [name]})}", status_code=303)
+        except RuntimeError as exc:
+            return PlainTextResponse(str(exc), status_code=409)
+
+    @app.post("/mailboxes/{name}/rescan")
+    def mailboxes_rescan(name: str):
+        """Forget the saved position so the next sync re-reads allowed mail. Idempotent; also refreshes email details."""
+        from finance.ledger import Ledger
+        if not load_config(mail_config_path).account(name):
+            return PlainTextResponse("no such mailbox", status_code=404)
+        ledger = Ledger(db_path)
+        try:
+            ledger.reset_imap_state(name)
+        finally:
+            ledger.close()
+        try:
+            return RedirectResponse(f"/jobs/{jobs.start('sync', {'accounts': [name]})}", status_code=303)
+        except RuntimeError as exc:
+            return PlainTextResponse(str(exc), status_code=409)
+
+    IDENTITY_LABELS = {"name": "Full name", "dob": "Date of birth", "pan": "PAN", "mobile": "Mobile number",
+                       "password": "Default PDF password (tried on every statement: CAS, bank, card, NPS)"}
+
+    def identity_ctx(flash: str = "", error: str = ""):
+        from finance.passwords import Identity
+        ident = Identity()
+        return dict(page="identity", flash=flash, error=error,
+                    extra_count=len(ident.extra_passwords()),
+                    fields=[(k, v, secret_store.has_secret(f"id:{k}")) for k, v in IDENTITY_LABELS.items()])
+
+    @app.get("/identity", response_class=HTMLResponse)
+    def identity_page(request: Request, flash: str = ""):
+        return render(request, "identity.html", **identity_ctx(flash=flash))
+
+    @app.post("/identity", response_class=HTMLResponse)
+    async def identity_save(request: Request):
+        form = await request.form()
+        dob = str(form.get("dob", "")).strip()
+        if dob:                                               # validate before touching any secret
+            try:
+                from datetime import date as _d
+                if _d.fromisoformat(dob) > _d.today():
+                    raise ValueError
+            except ValueError:
+                return render(request, "identity.html", **identity_ctx(error="Date of birth must be a valid date in the past."))
+        if form.get("clear_extra"):
+            secret_store.delete_secret("id:extra_passwords")
+        for key in IDENTITY_LABELS:
+            value = str(form.get(key, "")).strip()
+            if form.get(f"clear_{key}"):
+                secret_store.delete_secret(f"id:{key}")
+                if key == "password":
+                    secret_store.delete_secret("id:cas_password")      # the old name; otherwise it would reappear
+            elif value:
+                secret_store.set_secret(f"id:{key}", value)
+        return RedirectResponse("/identity?flash=Saved", status_code=303)
+
+    # ── review queue ──────────────────────────────────────────────────────────
+
+    def _review_page(request: Request, note: str = ""):
+        conn = connect_ro(db_path)
+        try:
+            items = analytics.review_items_detailed(conn)
+        finally:
+            conn.close()
+        return render(request, "review.html", items=items, page="review", note=note)
+
+    @app.post("/review/scan-duplicates", response_class=HTMLResponse)
+    def review_scan_duplicates(request: Request):
+        from finance.ledger import Ledger
+        ledger = Ledger(db_path)
+        try:
+            found = ledger.flag_duplicate_accounts() + ledger.flag_duplicate_transactions()
+        finally:
+            ledger.close()
+        return _review_page(request, f"Scan finished: {len(found)} new finding(s) queued below." if found
+                            else "Scan finished: nothing new found.")
+
+    @app.post("/review/{item_id}/duplicate-txns", response_class=HTMLResponse)
+    def review_duplicate_txns(request: Request, item_id: int):
+        from finance.ledger import Ledger
+        conn = connect_ro(db_path)
+        try:
+            row = conn.execute("SELECT id FROM review_queue WHERE id=? AND kind='duplicate_txns' AND status='open'",
+                               (item_id,)).fetchone()
+        finally:
+            conn.close()
+        if not row:
+            return PlainTextResponse("no such open item", status_code=404)
+        ledger = Ledger(db_path)
+        try:
+            backup = ledger.backup(BACKUP_DIR)
+            n = ledger.remove_duplicate_transactions()
+        finally:
+            ledger.close()
+        return _review_page(request, f"Removed {n} duplicate transaction(s). Backup saved as {Path(backup).name} in data/backups.")
+
+    @app.post("/review/merge-all-duplicates", response_class=HTMLResponse)
+    def review_merge_all(request: Request):
+        from finance.ledger import Ledger
+        ledger = Ledger(db_path)
+        try:
+            backup = ledger.backup(BACKUP_DIR)
+            res = ledger.merge_all_duplicates()
+        finally:
+            ledger.close()
+        return _review_page(request, f"Merged {res['merged']} folio pair(s): {res['moved']} transaction(s) moved, "
+                                     f"{res['dropped']} duplicate(s) dropped. Backup saved as {Path(backup).name} in data/backups.")
+
+    @app.post("/review/{item_id}/duplicate/{decision}", response_class=HTMLResponse)
+    def review_duplicate(request: Request, item_id: int, decision: str):
+        from finance.ledger import Ledger
+        conn = connect_ro(db_path)
+        try:
+            row = conn.execute("SELECT * FROM review_queue WHERE id=? AND kind='duplicate_folio' AND status='open'",
+                               (item_id,)).fetchone()
+        finally:
+            conn.close()
+        if not row or decision not in ("merge", "separate"):
+            return PlainTextResponse("no such open item", status_code=404)
+        ledger = Ledger(db_path)
+        try:
+            if decision == "separate":
+                ledger.keep_separate(item_id)
+                note = "Kept as separate folios."
+            else:
+                _, pa, pb = row["ref"].split(":")
+                backup = ledger.backup(BACKUP_DIR)                     # always snapshot before changing data
+                res = ledger.merge_accounts(int(pa), int(pb))
+                note = (f"Merged: {res['moved']} transaction(s) moved, {res['dropped']} duplicate(s) dropped. "
+                        f"Backup saved as {Path(backup).name} in data/backups.")
+        except ValueError as exc:
+            note = f"Could not merge: {exc}"
+        finally:
+            ledger.close()
+        return _review_page(request, note)
+
+    @app.post("/review/{item_id}/attention/{decision}", response_class=HTMLResponse)
+    def review_attention(request: Request, item_id: int, decision: str, password: str = Form(""),
+                         remember: str = Form(""), apply_all: str = Form("")):
+        from finance.sync import SyncRunner
+        conn = connect_ro(db_path)
+        try:
+            row = conn.execute("SELECT * FROM review_queue WHERE id=? AND kind='needs_attention' AND status='open'",
+                               (item_id,)).fetchone()
+            others = conn.execute("SELECT * FROM review_queue WHERE kind='needs_attention' AND status='open' "
+                                  "AND id != ?", (item_id,)).fetchall()
+        finally:
+            conn.close()
+        if not row or decision not in ("retry", "dismiss"):
+            return PlainTextResponse("no such open item", status_code=404)
+        runner = SyncRunner(db_path=db_path, config=load_config(mail_config_path), log=lambda m: None)
+        doc_id = int(row["ref"].split(":")[1])
+        pw = password or None                              # typed password: used in memory, never echoed or logged
+        if decision == "dismiss":
+            runner.dismiss(doc_id)
+            note = "Dismissed."
+        else:
+            note = runner.retry(doc_id, password=pw, remember=bool(remember))
+            if apply_all and pw:
+                results = [runner.retry(int(o["ref"].split(":")[1]), password=pw) for o in others]
+                ok = sum(r in ("imported", "duplicate") for r in results)
+                note += f" · tried the same password on {len(results)} other waiting statement(s): {ok} unlocked."
+                if ok and remember:
+                    runner.remember_password(pw)
+            if pw and remember and note.split(" ")[0] in ("imported", "duplicate"):
+                note += " · password remembered in your keyring."
+        conn = connect_ro(db_path)
+        try:
+            items = analytics.review_items_detailed(conn)
+        finally:
+            conn.close()
+        return render(request, "review.html", items=items, page="review", note=note)
+
+    @app.get("/review", response_class=HTMLResponse)
+    def review_page(request: Request):
+        conn = connect_ro(db_path)
+        try:
+            items = analytics.review_items_detailed(conn)
+        finally:
+            conn.close()
+        return render(request, "review.html", items=items, page="review")
+
+    @app.post("/review/{item_id}/folio/{decision}")
+    def review_folio(item_id: int, decision: str):
+        from finance.ledger import Ledger
+        if decision not in ("close", "keep"):
+            return PlainTextResponse("bad decision", status_code=404)
+        ledger = Ledger(db_path)
+        try:
+            ledger.resolve_folio_missing(item_id, close=(decision == "close"))
+        except ValueError:
+            return PlainTextResponse("no such open item", status_code=404)
+        finally:
+            ledger.close()
+        return RedirectResponse("/review", status_code=303)
+
+    @app.post("/review/{item_id}/resolve")
+    def review_resolve(item_id: int):
+        from finance.ledger import Ledger
+        ledger = Ledger(db_path)
+        try:
+            ledger.resolve_review(item_id)
+        finally:
+            ledger.close()
+        return RedirectResponse("/review", status_code=303)
+
+    return app

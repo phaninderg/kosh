@@ -1,0 +1,30 @@
+{% extends "base.html" %}{% block body %}
+<h1>Mailboxes</h1>
+{% if flash %}<div class="flash ok">{{ flash }}</div>{% endif %}{% if error %}<div class="flash err">{{ error }}</div>{% endif %}
+<p class="mute">Read-only IMAP: the app opens the folder in examine mode, never marks mail as read, and never moves or deletes anything. Only mail from the senders you list is downloaded. Use an <b>app password</b> (Gmail: Google Account → Security → App passwords; Yahoo: Account security → Generate app password). It goes to your OS keyring.</p>
+{% for x in accounts %}
+<div class="card"><b>{{ x.a.name }}</b> <span class="mute">· {{ x.a.provider }} · {{ x.a.username }} · folder {{ x.a.folder }}</span>
+ <p class="mute">App password: {{ '✓ stored' if x.password_set else '✗ not set' }} · Last sync: {% if x.last_sync %}{{ x.last_sync|ts }}{% else %}never{% endif %} · Senders: {{ x.a.senders|map(attribute='match')|join(', ') }}</p>
+ <form method="post" action="/mailboxes/{{ x.a.name }}/sync" style="display:inline"><button {{ 'disabled' if running }}>Sync now</button></form>
+ <form method="post" action="/mailboxes/{{ x.a.name }}/test" style="display:inline"><button class="sec">Test connection</button></form>
+ <form method="post" action="/mailboxes/{{ x.a.name }}/rescan" style="display:inline" onsubmit="return confirm('Re-read all allowed mail from the lookback window? Nothing is duplicated; email details are refreshed.')"><button class="sec" {{ 'disabled' if running }}>Re-scan</button></form>
+ <a class="btn sec" href="/mailboxes?edit={{ x.a.name }}">Edit</a>
+ <form method="post" action="/mailboxes/{{ x.a.name }}/delete" style="display:inline" onsubmit="return confirm('Remove this mailbox? Imported data is kept.')"><button class="sec">Remove</button></form></div>
+{% else %}<div class="card mute">No mailboxes yet — add one below.</div>{% endfor %}
+
+<h2>{{ 'Edit' if editing else 'Add' }} mailbox</h2>
+<form class="card" method="post" action="/mailboxes/save" autocomplete="off">
+ <label>Name (letters, digits, - _)</label><input name="name" value="{{ form.name }}" required {{ 'readonly' if editing }}>
+ <label>Provider</label><select name="provider">{% for p in ['gmail','yahoo','custom'] %}<option {{ 'selected' if p==form.provider }}>{{ p }}</option>{% endfor %}</select>
+ <label>Email address (login)</label><input type="email" name="username" value="{{ form.username }}" required>
+ <label>IMAP host (only for “custom”)</label><input name="host" value="{{ form.host }}" placeholder="imap.example.com">
+ <label>App password {{ '(leave blank to keep the stored one)' if editing }}</label><input type="password" name="app_password" autocomplete="new-password">
+ <label>Folder</label><input name="folder" value="{{ form.folder }}">
+ <label>First-sync lookback (days)</label><input type="number" name="lookback_days" value="{{ form.lookback_days }}" min="1" max="3650">
+ <label>Allowed senders — one per line: <code>domain-or-address | parser | password template ; template</code></label>
+ <textarea name="senders" rows="5" style="width:100%;font-family:monospace">{{ form.senders }}</textarea>
+ <p class="mute">Defaults are the usual CAS senders — confirm them against a real statement email. Templates are optional per sender. A mutual fund (CAS) sender needs none: the default password from Identity is always tried. Tokens: <code>{name4} {NAME4} {mobile5} {ddmm} {ddmmyy} {ddmmyyyy} {yyyy} {pan} {PAN} {password}</code></p>
+ <label><input type="checkbox" name="require_auth" value="1" {{ 'checked' if form.require_auth }} style="width:auto"> Reject mail whose DKIM/SPF/DMARC check explicitly failed</label>
+ <p><button>Save mailbox</button></p></form>
+
+{% endblock %}

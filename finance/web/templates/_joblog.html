@@ -1,0 +1,5 @@
+<div {% if job.status == 'running' %}hx-get="/jobs/{{ job.id }}/log" hx-trigger="every 2s" hx-swap="outerHTML"{% endif %}>
+<p>Status: <b class="{{ 'good' if job.status=='done' else 'bad' if job.status in ('failed','interrupted') }}">{{ job.status }}</b>
+{% if job.status == 'done' and job.action == 'sync' %} · <a class="btn" href="/">Overview</a> <a class="btn sec" href="/review">Review queue</a>{% endif %}
+ · <a href="/mailboxes">back to mailboxes</a></p>
+<pre class="log">{{ log }}</pre></div>

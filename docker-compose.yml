@@ -1,0 +1,15 @@
+# docker compose up, then open the URL printed in `docker compose logs kosh` (it carries the access token).
+services:
+  kosh:
+    image: ghcr.io/phaninderg/kosh:latest
+    build: .
+    ports:
+      - "127.0.0.1:${KOSH_PORT:-8765}:8765"        # loopback only: the UI has no login beyond the per-launch token
+    environment:
+      KOSH_PUBLIC_PORT: ${KOSH_PORT:-8765}           # so the printed link and the host check use the port you chose
+    volumes:
+      - kosh-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  kosh-data:

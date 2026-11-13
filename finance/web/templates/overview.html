@@ -1,0 +1,67 @@
+{% extends "base.html" %}{% block body %}
+{% set assets = ov.assets|selectattr('present')|list %}
+<h1>Overview</h1>
+{% if review_count %}<div class="flash err">{{ review_count }} item(s) need review — <a href="/review">open review queue</a>. Totals below can be off until they are resolved.</div>{% endif %}
+{% if not ov.any %}
+<div class="card">Nothing imported yet. <a href="/import">Import a statement</a> or set up a <a href="/mailboxes">mailbox</a> to see your net worth here.</div>
+{% else %}
+<div class="ov">
+ <div class="card ov-hero">
+  <div class="ov-label">Net worth</div>
+  <div class="ov-figure {{ 'neg' if ov.net_worth < 0 }}">{{ ov.net_worth|inr }}</div>
+  <div class="ov-note">Bank, fixed deposits, mutual funds, PPF and NPS. Each part is as of its own latest statement (dates below), so the total mixes dates.</div>
+  {% if ov.liability.dues %}<div class="ov-note">Credit card bills coming up: <b>{{ ov.liability.payable|inr }}</b>. Not deducted here: the app cannot tell whether a bill is already paid until the next statement.</div>{% endif %}
+ </div>
+
+ {% if assets %}
+ <div class="card ov-chart" role="group" aria-label="What your assets are made of">
+  <h2>What your assets are made of</h2>
+  <div class="ov-stack" role="img" aria-label="Share of assets by class">
+   {% for a in assets if a.value > 0 %}<a class="seg c-{{ a.key }}" href="{{ a.href }}" style="flex-grow:{{ a.value|float }}" title="{{ a.label }}: {{ a.value|inr }} ({{ a.share_pct }}%)">{% if a.share_pct and a.share_pct >= 12 %}<span>{{ a.label }} · {{ a.share_pct }}%</span>{% endif %}</a>{% endfor %}
+  </div>
+  <ul class="ov-legend">
+   {% for a in assets %}<li><i class="sw c-{{ a.key }}"></i><span class="nm">{{ a.label }}</span><span class="am">{{ a.value|inr }}</span><span class="pc">{{ (a.share_pct ~ '%') if a.share_pct is not none else '—' }}</span></li>{% endfor %}
+  </ul>
+ </div>
+
+ <div class="card ov-chart" role="group" aria-label="Each asset class in rupees">
+  <h2>Where your net worth sits</h2>
+  {% set peak = [ov.assets|map(attribute='value')|max, 1]|max|float %}
+  <div class="ov-bars">
+   {% for a in assets %}<div class="row"><div class="nm">{{ a.label }}</div>
+    <div class="track"><div class="half neg-half"></div><div class="half pos-half"><a class="bar c-{{ a.key }}" href="{{ a.href }}" style="width:{{ (a.value|float / peak * 100)|round(1) }}%" title="{{ a.label }}: {{ a.value|inr }}"></a></div></div>
+    <div class="am">{{ a.value|inr }}</div></div>{% endfor %}
+  </div>
+  <details class="ov-table"><summary>View as a table</summary>
+   <table><tr><th>Part</th><th class="n">Amount</th><th>As of</th></tr>
+   {% for a in assets %}<tr><td>{{ a.label }}</td><td class="n">{{ a.value|inr }}</td><td>{{ a.as_of or '—' }}</td></tr>{% endfor %}
+   <tr><th>Net worth</th><th class="n">{{ ov.net_worth|inr }}</th><th></th></tr></table>
+  </details>
+ </div>
+ {% endif %}
+</div>
+
+<div class="grid ov-tiles">
+ {% for a in ov.assets %}<a class="card ov-tile {{ '' if a.present else 'empty' }}" href="{{ a.href if a.present else '/import' }}">
+  <div class="ov-label"><i class="sw c-{{ a.key }}"></i>{{ a.label }}</div>
+  {% if a.present %}
+   <div class="v">{{ a.value|inr }}</div>
+   {% if a.key in ('mf', 'nps') %}<div class="ov-sub">
+     {% if a.gain is not none %}<span class="{{ 'good' if a.gain >= 0 else 'bad' }}">{{ ('+' if a.gain >= 0 else '') ~ (a.gain|inr) }}{% if a.gain_pct is defined and a.gain_pct is not none %} ({{ a.gain_pct }}%){% endif %}</span>{% endif %}
+     {% if a.xirr_pct is not none %}<span>XIRR {{ a.xirr_pct }}%</span>{% elif a.key == 'nps' %}<span class="mute">return needs the full history</span>{% endif %}</div>{% endif %}
+   {% for line in a.lines %}<div class="mute small">{{ line }}</div>{% endfor %}
+   <div class="mute small">as of {{ a.as_of }}</div>
+  {% else %}<div class="mute">Nothing imported yet</div>{% endif %}
+ </a>{% endfor %}
+ {% set c = ov.liability %}
+ <a class="card ov-tile {{ '' if c.present else 'empty' }}" href="{{ c.href if c.present else '/import' }}">
+  <div class="ov-label"><i class="sw c-card"></i>Credit card dues</div>
+  {% if c.present %}
+   {% if c.dues %}
+    <div class="v">{{ c.payable|inr }}</div>
+    {% for d in c.dues %}<div class="small">{{ d.card }} = <b>{{ d.payable|inr }}</b>{% if d.due_date %} by {{ d.due_date }}{% endif %}</div>{% endfor %}
+   {% else %}<div class="v">{{ 0|inr }}</div>{% endif %}
+  {% else %}<div class="mute">Nothing imported yet</div>{% endif %}
+ </a>
+</div>
+{% endif %}{% endblock %}

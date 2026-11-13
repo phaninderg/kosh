@@ -1,0 +1,219 @@
+[
+  {
+    "file": "bank/icici_monthly_combined.pdf",
+    "parser": "icici",
+    "password": null,
+    "about": "The statement ICICI emails every month: savings, PPF and a linked fixed deposit in one PDF.",
+    "expect": {
+      "accounts": [
+        {
+          "type": "ppf",
+          "last4": "5678",
+          "rows": 1,
+          "opening": "100000.00",
+          "closing": "105000.00"
+        },
+        {
+          "type": "bank",
+          "last4": "1234",
+          "rows": 5,
+          "opening": "300000.00",
+          "closing": "485650.00"
+        }
+      ],
+      "deposits": 1,
+      "warnings": 0
+    }
+  },
+  {
+    "file": "bank/icici_monthly_combined_encrypted.pdf",
+    "parser": "icici",
+    "password": "TEST0115",
+    "about": "The same statement, password-protected (password is in the manifest).",
+    "expect": {
+      "accounts": [
+        {
+          "type": "ppf",
+          "last4": "5678",
+          "rows": 1,
+          "opening": "100000.00",
+          "closing": "105000.00"
+        },
+        {
+          "type": "bank",
+          "last4": "1234",
+          "rows": 5,
+          "opening": "300000.00",
+          "closing": "485650.00"
+        }
+      ],
+      "deposits": 1,
+      "warnings": 0
+    }
+  },
+  {
+    "file": "bank/icici_requested_period.pdf",
+    "parser": "icici",
+    "password": null,
+    "about": "The 'Statement of Transactions' requested from net banking for a period; header repeats on every page.",
+    "expect": {
+      "accounts": [
+        {
+          "type": "bank",
+          "last4": "1234",
+          "rows": 5,
+          "opening": "10000.00",
+          "closing": "43449.50"
+        }
+      ],
+      "deposits": 0,
+      "warnings": 0
+    }
+  },
+  {
+    "file": "cards/icici_card.pdf",
+    "parser": "icici_card",
+    "password": null,
+    "about": "ICICI credit card statement.",
+    "expect": {
+      "accounts": [
+        {
+          "type": "card",
+          "last4": "1234",
+          "rows": 5,
+          "opening": "-2000.00",
+          "closing": "-2800.49"
+        }
+      ],
+      "deposits": 0,
+      "warnings": 0
+    }
+  },
+  {
+    "file": "cards/hdfc_card_one.pdf",
+    "parser": "hdfc_card",
+    "password": null,
+    "about": "HDFC credit card statement (first of two cards; the parser keeps them as separate accounts).",
+    "expect": {
+      "accounts": [
+        {
+          "type": "card",
+          "last4": "1111",
+          "rows": 5,
+          "opening": "-2000.00",
+          "closing": "-2800.49"
+        }
+      ],
+      "deposits": 0,
+      "warnings": 0
+    }
+  },
+  {
+    "file": "cards/hdfc_card_two.pdf",
+    "parser": "hdfc_card",
+    "password": null,
+    "about": "HDFC credit card statement for a second card with different spends.",
+    "expect": {
+      "accounts": [
+        {
+          "type": "card",
+          "last4": "2222",
+          "rows": 3,
+          "opening": "-500.00",
+          "closing": "-500.50"
+        }
+      ],
+      "deposits": 0,
+      "warnings": 0
+    }
+  },
+  {
+    "file": "cards/axis_card.pdf",
+    "parser": "axis_card",
+    "password": null,
+    "about": "Axis credit card statement.",
+    "expect": {
+      "accounts": [
+        {
+          "type": "card",
+          "last4": "7890",
+          "rows": 5,
+          "opening": "-2000.00",
+          "closing": "-2800.49"
+        }
+      ],
+      "deposits": 0,
+      "warnings": 0
+    }
+  },
+  {
+    "file": "cards/tata_card_encrypted.pdf",
+    "parser": "tata_card",
+    "password": "150819900099",
+    "about": "Tata Neu card statement; real ones open with ddmmyyyy of the birth date followed by the card's last 4 digits.",
+    "expect": {
+      "accounts": [
+        {
+          "type": "card",
+          "last4": "XX99",
+          "rows": 5,
+          "opening": "-2000.00",
+          "closing": "-2800.49"
+        }
+      ],
+      "deposits": 0,
+      "warnings": 0
+    }
+  },
+  {
+    "file": "nps/nps_monthly_emailed.pdf",
+    "parser": "nps",
+    "password": null,
+    "about": "Monthly NPS transaction statement as emailed: schemes one below another.",
+    "expect": {
+      "folios": [
+        {
+          "folio": "9012",
+          "schemes": 3,
+          "rows": 4,
+          "value": "20188.00"
+        }
+      ],
+      "warnings": 0
+    }
+  },
+  {
+    "file": "nps/nps_monthly_side_by_side.pdf",
+    "parser": "nps",
+    "password": null,
+    "about": "Monthly NPS statement with the schemes side by side (three-line rows).",
+    "expect": {
+      "folios": [
+        {
+          "folio": "9012",
+          "schemes": 3,
+          "rows": 4,
+          "value": "20188.00"
+        }
+      ],
+      "warnings": 0
+    }
+  },
+  {
+    "file": "nps/nps_portal_annual.pdf",
+    "parser": "nps",
+    "password": null,
+    "about": "Annual statement downloaded from the NPS portal: four-digit years, full period.",
+    "expect": {
+      "folios": [
+        {
+          "folio": "9012",
+          "schemes": 3,
+          "rows": 4,
+          "value": "20188.00"
+        }
+      ],
+      "warnings": 0
+    }
+  }
+]

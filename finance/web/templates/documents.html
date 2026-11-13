@@ -1,0 +1,22 @@
+{% extends "base.html" %}{% block body %}
+<h1>Documents</h1>
+<p class="mute">Every statement the app has seen: which email it came from, when that email was sent, when it was picked up, and what it produced. Times are shown in your local time. Subjects and filenames have your name, PAN and long numbers masked before storage.</p>
+<form class="row card" method="get">
+ <div><label>Search sender / subject / file / message-id</label><input name="q" value="{{ q }}"></div>
+ <div><label>Status</label><select name="status"><option value="">All</option>{% for s in statuses %}<option {{ 'selected' if s==status }}>{{ s }}</option>{% endfor %}</select></div>
+ <div><label>Mailbox</label><select name="account"><option value="">All</option>{% for a in accounts %}<option value="{{ a }}" {{ 'selected' if a==account }}>{{ mb(a) }}</option>{% endfor %}</select></div>
+ <button>Filter</button></form>
+<div class="card wrap"><table>
+<tr><th>Email date</th><th>Picked up</th><th>From</th><th>Subject / file</th><th>Mailbox</th><th>Status</th><th>Statement period</th><th class="n">New txns</th><th class="n">Known</th></tr>
+{% for d in docs %}<tr>
+ <td>{{ d.received_at|ts }}</td><td>{{ d.picked_up_at|ts }}</td>
+ <td>{{ d.sender or ('manual upload' if d.source == 'upload' else '—') }}</td>
+ <td>{{ d.subject or '—' }}<div class="mute">{{ d.filename or '' }}{% if d.size %} · {{ (d.size/1024)|round(0)|int }} KB{% endif %}</div>
+  <details><summary class="mute">details</summary><div class="mute" style="word-break:break-all">
+   Message-ID: {{ d.message_id or '—' }}<br>SHA-256: {{ d.sha256[:16] }}…<br>Mailbox: {{ mb(d.account, d.folder, detail=True) }}<br>
+   Sender checks: {{ d.auth or 'none reported' }}<br>Parser: {{ d.parser or '—' }}{% if d.uid %}<br>Technical: IMAP UID {{ d.uid }}{% endif %}<br>Last processed: {{ d.processed_at|ts }}{% if d.error %}<br>Note: {{ d.error }}{% endif %}</div></details></td>
+ <td>{{ mb(d.account) }}</td>
+ <td class="{{ 'good' if d.status=='imported' else 'bad' if d.status in ('needs_attention','failed') else 'mute' }}">{{ d.status }}</td>
+ <td>{{ d.period_from or '' }}{% if d.period_to %} → {{ d.period_to }}{% endif %}</td>
+ <td class="n">{{ d.txn_new }}</td><td class="n">{{ d.txn_dup }}</td></tr>
+{% else %}<tr><td colspan="9" class="mute">Nothing matches.</td></tr>{% endfor %}</table></div>{% endblock %}

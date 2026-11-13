@@ -1,0 +1,34 @@
+{% extends "base.html" %}{% block body %}
+<h1>Accounts</h1>
+<div class="card wrap"><table><tr><th>Account</th><th>Type</th><th class="n">Balance</th><th>As of</th></tr>
+{% for a in accounts %}<tr><td>{{ a.name }}</td><td>{{ {'bank':'Bank','ppf':'PPF','card':'Credit card'}.get(a.type, a.type) }}{% if a.liability %} <span class="mute">(owed)</span>{% endif %}</td>
+<td class="n">{{ a.balance|inr(2) }}</td><td>{{ a.as_of }}</td></tr>
+{% else %}<tr><td colspan="4" class="mute">No bank, PPF or card statements imported yet. Add a sender rule with parser <code>icici</code>, <code>icici_card</code>, <code>hdfc_card</code>, <code>axis_card</code> or <code>tata_card</code> on the Mailboxes page, or run <code>python main.py import-statement &lt;pdf&gt;</code>.</td></tr>{% endfor %}</table></div>
+{% if nps.rows %}<h2>NPS</h2>
+<div class="grid">
+ <div class="card stat"><div class="l">Value</div><div class="v">{{ nps.total_value|inr }}</div></div>
+ <div class="card stat"><div class="l">Contributed</div><div class="v">{{ nps.total_contributed|inr }}</div>{% if not nps.complete %}<div class="mute">since {{ nps.first_statement }}</div>{% endif %}</div>
+ <div class="card stat"><div class="l">Gain</div><div class="v {{ 'good' if nps.gain is not none and nps.gain>=0 else 'bad' }}">{{ nps.gain|inr if nps.gain is not none else '—' }}</div></div>
+ <div class="card stat"><div class="l">XIRR</div><div class="v">{{ nps.xirr_pct ~ '%' if nps.xirr_pct is not none else '—' }}</div></div>
+</div>
+{% if not nps.complete %}<div class="flash err">Gain and XIRR are not shown because the history is incomplete: {{ nps.reasons|join('; ') }}. Import the missing statements (the annual ones from the NPS portal cover a year each).</div>{% endif %}
+<div class="card wrap"><table><tr><th>Scheme</th><th>Account</th><th class="n">Units</th><th class="n">NAV</th><th class="n">Value</th><th class="n">Share</th></tr>
+{% for r in nps.rows %}<tr><td>{{ r.scheme_name }}</td><td>{{ r.account }}</td><td class="n">{{ '%.4f'|format(r.units) }}</td><td class="n">{{ '%.4f'|format(r.nav) }}</td><td class="n">{{ r.value|inr(2) }}</td><td class="n">{{ r.share_pct ~ '%' if r.share_pct is not none else '—' }}</td></tr>{% endfor %}</table></div>
+<p class="mute">As of {{ nps.as_of }}, from your NPS statements. The return is for the whole NPS account, not per scheme: money in is every contribution (yours and your employer's) and the value is what the schemes you hold are worth now. Moving units between schemes and charges are not cash flows (charges already lower the value).</p>{% endif %}
+{% if deposits %}<h2>Fixed deposits</h2>
+<div class="card wrap"><table><tr><th>Deposit</th><th>Opened</th><th class="n">Principal</th><th class="n">Rate %</th><th>Tenure</th><th>Matures</th><th class="n">Maturity amount</th><th class="n">Current balance</th><th>As of</th></tr>
+{% for d in deposits %}<tr><td>{{ d.institution }} …{{ d.mask }}{% if d.linked_mask %}<div class="mute">linked to …{{ d.linked_mask }}</div>{% endif %}</td><td>{{ d.open_date }}</td>
+<td class="n">{{ d.principal|inr(2) }}</td><td class="n">{{ d.rate }}</td><td>{{ d.tenure }}</td><td>{{ d.maturity_date }}</td><td class="n">{{ d.maturity_amount|inr(2) }}</td><td class="n">{{ d.current_balance|inr(2) }}</td><td>{{ d.as_of }}</td></tr>{% endfor %}</table></div>
+<p class="mute">Current balance is the deposit plus interest up to the previous financial year, as the bank reports it.</p>{% endif %}
+{% if flow %}<h2>Bank balance by month</h2>
+<div class="card wrap"><table><tr><th>Month</th><th class="n">Opening balance</th><th class="n">In</th><th class="n">Out</th><th class="n">Closing balance</th></tr>
+{% for m in flow %}<tr><td>{{ m.month }}</td><td class="n">{{ m.opening|inr(2) if m.opening is not none else '—' }}</td><td class="n">{{ m.money_in|inr(2) }}</td><td class="n">{{ (-m.money_out)|inr(2) }}</td>
+<td class="n"><b>{{ m.closing|inr(2) if m.closing is not none else '—' }}</b></td></tr>{% endfor %}</table></div>
+<p class="mute">Opening + In − Out = Closing. Moves between your own accounts (for example into PPF) and card bill payments are included here; they are marked “transfer” in Transactions. Investments such as SIPs are not separated from spending yet.</p>{% endif %}
+{% if card_flow %}<h2>Card spending by month</h2>
+<div class="card wrap"><table><tr><th>Month</th><th class="n">Purchases &amp; charges</th><th class="n">Refunds</th><th class="n">Net card spending</th><th>Statements considered</th></tr>
+{% for m in card_flow %}<tr><td>{{ m.month }}</td>
+<td class="n">{{ m.purchases|inr(2) }}</td><td class="n">{{ m.refunds|inr(2) }}</td><td class="n"><b>{{ m.net|inr(2) }}</b></td>
+<td>{% for s in m.statements %}<div>{{ s.card }} · statement {{ s.statement_date or s.period_to or '—' }}{% if s.period_from %} <span class="mute">({{ s.period_from }} → {{ s.period_to }})</span>{% endif %}: {{ s.rows }} row{{ 's' if s.rows != 1 }}, {{ s.purchases|inr(2) }}{% if s.refunds %} − {{ s.refunds|inr(2) }} refunds{% endif %}</div>{% endfor %}</td></tr>{% endfor %}</table></div>
+<p class="mute">Spending is by transaction date: purchases, fees and interest, less refunds. Card bill payments are never counted as spending, so paying a bill from your bank does not count twice. Statement periods rarely line up with calendar months, so a statement that spans two months is listed under both, with only that month's rows counted.</p>{% endif %}
+{% endblock %}

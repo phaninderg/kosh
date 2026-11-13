@@ -1,0 +1,23 @@
+{% extends "base.html" %}{% block body %}
+<h1>Import a statement</h1>
+<p class="mute">For statements that did not arrive through a mailbox sync: a download link, a file you saved, or one locked with a password only you know. Nothing is imported unless the statement adds up.</p>
+{% if summary and outcomes|length > 1 %}<div class="flash {{ 'err' if summary.failed else 'ok' }}"><b>{{ summary.imported }} imported, {{ summary.known }} already imported, {{ summary.failed }} failed</b> (of {{ outcomes|length }} files)</div>{% endif %}
+{% for o in outcomes %}{% if o.error %}<div class="flash err">{% if outcomes|length > 1 and o.name %}<b>{{ o.name }}</b> — {% endif %}{{ o.error }}</div>
+{% elif o.result %}<div class="flash ok">{% if outcomes|length > 1 %}<b>{{ o.name }}</b> — {% endif %}
+{% if o.result.status == 'duplicate' %}This exact file was already imported — nothing changed.
+{% else %}Imported as <b>{{ parser_labels.get(o.used, o.used) }}</b>: {{ o.result.txn_new }} new transactions, {{ o.result.txn_dup }} already known{% if o.used == 'cas' %}, {{ o.result.holdings }} holdings updated{% endif %}.{% endif %}
+{% for w in o.result.warnings %}<div class="bad">⚠ {{ w }}</div>{% endfor %}</div>{% endif %}{% endfor %}
+<form class="card" method="post" enctype="multipart/form-data">
+ <label>Statement PDFs <span class="mute">(you can pick several of the same type; they share the type and password below)</span></label>
+ <input type="file" name="file" accept="application/pdf" multiple required>
+ <label>Statement type</label>
+ <select name="parser">{% for key, label in choices %}<option value="{{ key }}"{{ ' selected' if key == selected }}>{{ label }}</option>{% endfor %}</select>
+ <label>PDF password (optional)</label>
+ <input type="password" name="password" autocomplete="off">
+ <p class="mute">If left blank, the password is worked out from your Identity page using the password templates of your mailbox sender rules (and <code>CAS_PASSWORD</code> from .env). A typed password is used once, in memory; it is never stored or logged. Re-importing the same or an overlapping statement never creates duplicates.</p>
+ <button>Import</button></form>
+<h2>Manual import history</h2>
+<p class="mute">Only files uploaded on this page. Statements fetched from your mailboxes are listed under Documents.</p>
+<div class="card wrap"><table><tr><th>#</th><th>When</th><th>Status</th><th>Period</th><th class="n">New</th><th class="n">Known</th><th>Note</th></tr>
+{% for d in docs %}<tr><td>{{ d.id }}</td><td>{{ d.created_at|ts }}</td><td>{{ d.status }}</td><td>{{ d.period_from or '' }} → {{ d.period_to or '' }}</td><td class="n">{{ d.txn_new }}</td><td class="n">{{ d.txn_dup }}</td><td class="mute">{{ d.error }}</td></tr>
+{% else %}<tr><td colspan="7" class="mute">Nothing uploaded yet.</td></tr>{% endfor %}</table></div>{% endblock %}

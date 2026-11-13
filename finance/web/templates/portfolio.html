@@ -1,0 +1,48 @@
+{% extends "base.html" %}{% block body %}
+<h1>Mutual fund portfolio</h1>
+{% if unreliable %}<div class="flash err"><b>These totals are not reliable yet.</b> The same folio or transaction is stored more than once, so invested, value and XIRR are overstated. <a href="/review">Fix it in the Review queue</a> (remove duplicate transactions, then merge folios; a backup is saved first).</div>
+{% elif review_count %}<div class="flash err">{{ review_count }} item(s) need review — <a href="/review">open review queue</a></div>{% endif %}
+{% if not view.rows %}
+<div class="card">No holdings yet. <a href="/import">Import a CAS PDF</a> to get started.</div>
+{% else %}
+<div class="grid">
+ <div class="card stat"><div class="l">Current value</div><div class="v">{{ view.total_value|inr }}</div></div>
+ <div class="card stat"><div class="l">Invested</div><div class="v">{{ view.total_cost|inr }}</div></div>
+ <div class="card stat"><div class="l">Gain / loss</div><div class="v {{ 'good' if view.pnl>=0 else 'bad' }}">{{ view.pnl|inr }}{% if view.abs_return_pct is not none %} <small>({{ view.abs_return_pct }}%)</small>{% endif %}</div></div>
+ <div class="card stat"><div class="l">XIRR</div><div class="v">{{ view.xirr_pct ~ '%' if view.xirr_pct is not none else '—' }}</div>{% if view.xirr_funds < view.rows|length %}<div class="mute">{{ view.xirr_funds }} of {{ view.rows|length }} funds (others have incomplete history)</div>{% endif %}</div>
+</div>
+<p class="mute">Valued as of statement date {{ view.as_of }}. XIRR covers current holdings with complete history.{% if view.cost_missing %} <b>Invested excludes {{ view.cost_missing }} fund(s) whose statement gave no cost.</b>{% endif %}</p>
+<div class="charts">
+ <div class="card"><h2>By category <span class="mute small">share of value</span></h2>
+  <div class="pie-wrap"><canvas id="cat" role="img" aria-label="Share of value by category"></canvas></div>
+  <details class="ov-table"><summary>View as a table</summary><table><tr><th>Category</th><th class="n">Share</th></tr>
+  {% for name, amount, pct in categories %}<tr><td>{{ name }}</td><td class="n">{{ pct }}%</td></tr>{% endfor %}</table></details></div>
+ <div class="card"><h2>By AMC <span class="mute small">value</span></h2>
+  <div class="amc-bars">{% set peak = (amcs|map(attribute=1)|max)|float if amcs else 1 %}
+  {% for name, amount, pct in amcs %}<div class="row"><div class="nm" title="{{ name }}">{{ name }}</div>
+   <div class="track"><div class="bar" style="width:{{ (amount|float / peak * 100)|round(1) }}%" title="{{ name }}: {{ amount|inr }} ({{ pct }}%)"></div></div>
+   <div class="am">{{ amount|inr }}</div></div>{% endfor %}</div></div>
+</div>
+<div class="card wrap"><table>
+<tr><th>Fund</th><th>AMC · folio</th><th>Category</th><th class="n">Units</th><th class="n">NAV</th><th class="n">Invested</th><th class="n">Value</th><th class="n">Return</th><th class="n">XIRR</th></tr>
+{% for r in view.rows %}<tr><td>{{ r.scheme_name }}</td><td>{{ r.amc }} · …{{ r.mask }}</td><td>{{ r.category }}</td>
+<td class="n">{{ '%.3f'|format(r.units) }}</td><td class="n">{{ '%.4f'|format(r.nav) }}</td><td class="n">{{ r.cost|inr }}</td><td class="n">{{ r.value|inr }}</td>
+<td class="n {{ 'good' if r.pnl is not none and r.pnl>=0 else 'bad' }}">{{ (r.abs_return_pct ~ '%') if r.abs_return_pct is not none else '—' }}</td>
+<td class="n">{% if r.history_gap is not none %}<span title="Transactions explain {{ '%.3f'|format(r.units - r.history_gap) }} of {{ '%.3f'|format(r.units) }} units. Import a detailed statement covering the full history.">— <small class="bad">incomplete history</small></span>{% else %}{{ (r.xirr_pct ~ '%') if r.xirr_pct is not none else '—' }}{% endif %}</td></tr>{% endfor %}
+</table></div>
+<script src="/static/vendor/chart.umd.min.js"></script>
+<script>
+const css=getComputedStyle(document.documentElement), slot=i=>css.getPropertyValue('--s'+i).trim();
+const rows={{ cat_chart|tojson }}, colors=rows.map((r,i)=>r[0]==='Other'?css.getPropertyValue('--other').trim():slot(i+1));
+new Chart(document.getElementById('cat'),{type:'doughnut',
+ data:{labels:rows.map(r=>r[0]+' · '+r[1]+'%'),datasets:[{data:rows.map(r=>r[1]),backgroundColor:colors,borderColor:css.getPropertyValue('--card').trim(),borderWidth:2}]},
+ options:{cutout:'55%',plugins:{legend:{position:'right',labels:{color:css.getPropertyValue('--ink').trim(),boxWidth:12}},
+  tooltip:{callbacks:{label:c=>' '+c.label}}}}});
+</script>
+{% endif %}
+{% if redeemed %}<h2>Redeemed units</h2>
+<div class="card wrap"><table><tr><th>Fund</th><th>AMC · folio</th><th class="n">Units redeemed</th><th class="n">Proceeds</th><th>Last redemption</th><th class="n">Redemptions</th><th>Status</th></tr>
+{% for r in redeemed %}<tr><td>{{ r.scheme_name }}</td><td>{{ r.amc }} · …{{ r.mask }}</td><td class="n">{{ '%.3f'|format(r.units) }}</td>
+<td class="n">{{ r.amount|inr if r.amount is not none else '—' }}</td><td>{{ r.last }}</td><td class="n">{{ r.count if r.recorded else '—' }}</td>
+<td>{% if r.held > 0 %}Still held: {{ '%.3f'|format(r.held) }} units{% elif r.recorded %}Fully redeemed{% else %}Fully redeemed <span class="mute">· dropped from a newer statement; no sale is listed, so proceeds are unknown</span>{% endif %}</td></tr>{% endfor %}</table></div>
+<p class="mute">Redemptions and switch-outs come from your statements. A fund that simply disappears from a newer statement is also listed (units = what you last held, date = the statement where it was gone); its sale is not in any statement, so its proceeds are unknown.</p>{% endif %}{% endblock %}

@@ -1,0 +1,44 @@
+{% extends "base.html" %}{% block body %}
+<h1>Review queue</h1>
+<form method="post" action="/review/scan-duplicates" style="margin-bottom:12px"><button class="sec">Scan for duplicate folios</button> <span class="mute">checks existing data for the same folio stored twice</span></form>
+{% if note %}<div class="flash ok">{{ note }}</div>{% endif %}
+{% set dup_count = items|selectattr('kind','equalto','duplicate_folio')|list|length %}
+{% if dup_count > 1 %}<form method="post" action="/review/merge-all-duplicates" class="card"><b>{{ dup_count }} possible duplicate folios</b>
+ <p class="mute">If the list below looks right (same fund house, same funds), merge them all at once. A backup is saved first.</p><button>Merge all {{ dup_count }}</button></form>{% endif %}
+{% for i in items %}
+<div class="card"><b>{{ {'folio_missing':'Folio missing from a newer statement','needs_attention':'Statement needs attention','rejected_mail':'Mail rejected','duplicate_folio':'Possible duplicate folio','duplicate_txns':'Duplicate transactions','transfer_ambiguous':'Card payment not linked'}.get(i.kind, i.kind) }}</b>
+ <p>{{ i.reason }}</p>
+ {% if i.kind == 'duplicate_txns' %}
+ <p class="mute">The copy imported first is kept; later copies are removed (their dates differ by days or weeks between statements, so which date is right can't be known from the files). A backup is saved first. Do this <b>before</b> merging folios.</p>
+ <form method="post" action="/review/{{ i.id }}/duplicate-txns"><button>Remove duplicate transactions</button></form>
+ {% elif i.kind == 'duplicate_folio' %}
+ <div class="wrap"><table><tr><th>Fund</th><th>{{ i.dup.primary.institution }} …{{ i.dup.primary.mask }} (older)</th><th>…{{ i.dup.other.mask }}</th></tr>
+ {% for f in i.dup.funds %}<tr><td>{{ f.name }}</td>
+  <td>{% if f.a %}{{ f.a.units }} units · {{ f.a.value|inr }} · {{ f.a.as_of }}{% else %}—{% endif %}</td>
+  <td>{% if f.b %}{{ f.b.units }} units · {{ f.b.value|inr }} · {{ f.b.as_of }}{% else %}—{% endif %}</td></tr>{% endfor %}</table></div>
+ <p class="mute"><b>Merge</b> moves everything into the older folio, drops transactions both already have, and remembers the second spelling so future imports land in one place. If the newer statement shows 0 units, the fund leaves your portfolio. A database backup is saved first. Choose <b>Different folios</b> only if these really are two separate folios.</p>
+ <form method="post" action="/review/{{ i.id }}/duplicate/merge" style="display:inline"><button>Merge into one folio</button></form>
+ <form method="post" action="/review/{{ i.id }}/duplicate/separate" style="display:inline"><button class="sec">Different folios</button></form>
+ {% elif i.kind == 'folio_missing' %}
+ <div class="wrap"><table><tr><th>Fund</th><th class="n">Units</th><th class="n">Last known value</th><th>As of</th></tr>
+ {% for f in i.funds %}<tr><td>{{ f.scheme_name }}</td><td class="n">{{ f.units }}</td><td class="n">{{ f.value|inr }}</td><td>{{ f.as_of }}</td></tr>{% endfor %}</table></div>
+ <p class="mute">“Mark closed” records these funds as fully redeemed (0 units) from the statement date, so they leave your portfolio. “Keep” leaves them as held; you'll be asked again only for a later statement that still omits the folio.</p>
+ <form method="post" action="/review/{{ i.id }}/folio/close" style="display:inline"><button>Mark closed</button></form>
+ <form method="post" action="/review/{{ i.id }}/folio/keep" style="display:inline"><button class="sec">Keep as held</button></form>
+ {% elif i.kind == 'needs_attention' %}
+ {% if i.doc %}<table style="margin:8px 0"><tr><td class="mute">From</td><td>{{ i.doc.sender or '—' }}</td></tr>
+  <tr><td class="mute">Email date</td><td>{{ i.doc.received_at|ts }}</td></tr><tr><td class="mute">Picked up</td><td>{{ i.doc.picked_up_at|ts }}</td></tr>
+  <tr><td class="mute">Subject</td><td>{{ i.doc.subject or '—' }}</td></tr><tr><td class="mute">Attachment</td><td>{{ i.doc.filename or '—' }}{% if i.doc.size %} · {{ (i.doc.size/1024)|round(0)|int }} KB{% endif %}</td></tr>
+  <tr><td class="mute">Mailbox</td><td>{{ mb(i.doc.account, i.doc.folder, detail=True) }}</td></tr></table>{% endif %}
+ <p class="mute">Statements requested with a custom password can't be guessed from a pattern. Type it below (used once, in memory), or fix Identity / templates and retry.</p>
+ <form method="post" action="/review/{{ i.id }}/attention/retry" autocomplete="off">
+  <label>PDF password (optional)</label><input type="password" name="password" autocomplete="new-password">
+  <label style="display:inline"><input type="checkbox" name="remember" value="1" style="width:auto"> Remember it in my keyring if it works</label><br>
+  <label style="display:inline"><input type="checkbox" name="apply_all" value="1" style="width:auto"> Also try it on the other waiting statements</label>
+  <p><button>Retry</button></p></form>
+ <form method="post" action="/review/{{ i.id }}/attention/dismiss"><button class="sec">Dismiss</button></form>
+ {% else %}
+ <p class="mute">{{ i.ref }} · {{ i.created_at|ts }}</p>
+ <form method="post" action="/review/{{ i.id }}/resolve"><button class="sec">Mark resolved</button></form>
+ {% endif %}</div>
+{% else %}<div class="card mute">Nothing needs attention.</div>{% endfor %}{% endblock %}

@@ -1,0 +1,16 @@
+{% extends "base.html" %}{% block body %}
+<h1>Transactions</h1>
+<div class="tabs">{% for t in [''] + types %}<a class="{{ 'on' if t == account_type }}" href="/transactions?{{ {'account_type': t, 'q': q, 'date_from': date_from, 'date_to': date_to, 'sort': sort}|urlencode }}">{{ {'mutual_fund':'Mutual funds','bank':'Bank','ppf':'PPF','card':'Cards','nps':'NPS','epf':'EPF'}.get(t, t) if t else 'All accounts' }}</a>{% endfor %}</div>
+<form class="row card" method="get">
+ <input type="hidden" name="account_type" value="{{ account_type }}">
+ <div><label>Search</label><input name="q" value="{{ q }}" placeholder="payee, fund, amount, date, account…" style="min-width:260px"></div>
+ <div><label>Type</label><select name="kind"><option value="">All</option>{% for k in kinds %}<option {{ 'selected' if k==kind }}>{{ k }}</option>{% endfor %}</select></div>
+ <div><label>Sort by</label><select name="sort">{% for k, (label, _) in sorts.items() %}<option value="{{ k }}" {{ 'selected' if k == sort }}>{{ label }}</option>{% endfor %}</select></div>
+ <div><label>From</label><input type="date" name="date_from" value="{{ date_from }}"></div>
+ <div><label>To</label><input type="date" name="date_to" value="{{ date_to }}"></div>
+ <button>Filter</button></form>
+<div class="card wrap"><table><tr><th>Date</th><th>Description</th><th>Type</th><th class="n">Amount</th><th class="n">Units</th><th class="n">NAV</th></tr>
+{% for t in rows %}<tr><td>{{ t.date }}</td><td>{{ t.scheme_name or t.description }}<div class="mute">{{ t.institution }} · …{{ t.mask }}{% if t.linked %} · ↔ transfer between your accounts{% endif %}</div></td><td>{{ t.kind }}</td>
+<td class="n">{{ t.amount|inr(2) if t.amount else '—' }}</td><td class="n">{{ t.units or '—' }}</td><td class="n">{{ t.nav or '—' }}</td></tr>
+{% else %}<tr><td colspan="6" class="mute">No transactions.</td></tr>{% endfor %}</table></div>
+{% if rows|length >= 200 %}<p class="mute">Showing the latest 200 matches — narrow the filter to see more.</p>{% endif %}{% endblock %}
