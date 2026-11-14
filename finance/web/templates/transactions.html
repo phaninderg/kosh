@@ -9,8 +9,8 @@
  <div><label>From</label><input type="date" name="date_from" value="{{ date_from }}"></div>
  <div><label>To</label><input type="date" name="date_to" value="{{ date_to }}"></div>
  <button>Filter</button></form>
-<div class="card wrap"><table><tr><th>Date</th><th>Description</th><th>Type</th><th class="n">Amount</th><th class="n hide-sm">Units</th><th class="n hide-sm">NAV</th></tr>
-{% for t in rows %}<tr><td>{{ t.date }}</td><td>{{ t.scheme_name or t.description }}<div class="mute">{{ t.institution }} · …{{ t.mask }}{% if t.linked %} · ↔ transfer between your accounts{% endif %}</div></td><td>{{ t.kind }}</td>
+<div class="card wrap"><table><tr><th>Date</th><th>Description</th><th class="hide-sm">Type</th><th class="n">Amount</th><th class="n hide-sm">Units</th><th class="n hide-sm">NAV</th></tr>
+{% for t in rows %}<tr><td>{{ t.date }}</td><td>{{ t.scheme_name or t.description }}<div class="mute"><span class="show-sm">{{ t.kind }} · </span>{{ t.institution }} · …{{ t.mask }}{% if t.linked %} · ↔ transfer between your accounts{% endif %}</div></td><td class="hide-sm">{{ t.kind }}</td>
 <td class="n">{{ t.amount|inr(2) if t.amount else '—' }}</td><td class="n hide-sm">{{ t.units or '—' }}</td><td class="n hide-sm">{{ t.nav or '—' }}</td></tr>
 {% else %}<tr><td colspan="6" class="mute">No transactions.</td></tr>{% endfor %}</table></div>
 {% if rows|length >= 200 %}<p class="mute">Showing the latest 200 matches — narrow the filter to see more.</p>{% endif %}{% endblock %}

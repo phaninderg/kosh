@@ -1,8 +1,8 @@
 {% extends "base.html" %}{% block body %}
 <h1>Accounts</h1>
-<div class="card wrap"><table><tr><th>Account</th><th>Type</th><th class="n">Balance</th><th>As of</th></tr>
+<div class="card wrap"><table><tr><th>Account</th><th>Type</th><th class="n">Balance</th><th class="hide-sm">As of</th></tr>
 {% for a in accounts %}<tr><td>{{ a.name }}</td><td>{{ {'bank':'Bank','ppf':'PPF','card':'Credit card'}.get(a.type, a.type) }}{% if a.liability %} <span class="mute">(owed)</span>{% endif %}</td>
-<td class="n">{{ a.balance|inr(2) }}</td><td>{{ a.as_of }}</td></tr>
+<td class="n">{{ a.balance|inr(2) }}</td><td class="hide-sm">{{ a.as_of }}</td></tr>
 {% else %}<tr><td colspan="4" class="mute">No bank, PPF or card statements imported yet. Add a sender rule with parser <code>icici</code>, <code>icici_card</code>, <code>hdfc_card</code>, <code>axis_card</code> or <code>tata_card</code> on the Mailboxes page, or run <code>python main.py import-statement &lt;pdf&gt;</code>.</td></tr>{% endfor %}</table></div>
 {% if nps.rows %}<h2>NPS</h2>
 <div class="grid">

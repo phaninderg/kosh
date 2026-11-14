@@ -15,6 +15,24 @@ What I wanted from it, beyond a net-worth number:
 - **See how I spend.** Card spending by month and bank cash flow by month are on the Accounts page, so I can see whether spending is climbing and which months were heavy. Categories, recurring-payment detection (subscriptions, SIPs, EMIs) and "where can I cut" views are the next things on the [ROADMAP](ROADMAP.md).
 - **Mine to customise.** Apps like CRED show what they decide to show, on their servers, and change when they like. Here the data is a SQLite file and the code is open: add a parser for your bank, a view for how you think about money, or a rule for how you categorise, without waiting for anyone.
 
+## Where it stands
+
+- **Reads your statements locally**: ICICI bank (with FD and PPF), ICICI / HDFC / Axis / Tata credit cards, CAS mutual funds, and NPS, with checks that refuse anything whose arithmetic does not add up.
+- **Net worth, accounts, card dues and one searchable, sortable transaction list** across all of it.
+- **Profiles for the whole family**, each encrypted for that person alone (AES-256-GCM under a key only their password and recovery key can open), so not even the admin can read another person's data. Sign-up is by invite, sign-in by passkey or password, all from the browser.
+- **An installable phone app (PWA)** you can host on your own server or over Tailscale; it never stores your figures on the device.
+- **Docker image, dummy sample statements for every layout, and a long [ROADMAP](ROADMAP.md)** of banks, cards and features that still need building.
+
+<p>
+<img src="docs/screenshots/1-web-overview.png" alt="Overview on the web" width="480">
+<img src="docs/screenshots/2-iphone-overview.png" alt="Overview on an iPhone" width="150">
+<img src="docs/screenshots/3-iphone-search-sip.png" alt="Searching every SIP on an iPhone" width="150">
+<img src="docs/screenshots/4-android-accounts.png" alt="Accounts on Android" width="150">
+<img src="docs/screenshots/5-android-signin.png" alt="Sign-in with a passkey on Android" width="150">
+</p>
+
+*Screenshots use invented demo data.*
+
 ## Quick start
 
 **Prerequisites:** Python 3.10+ (developed on 3.14).

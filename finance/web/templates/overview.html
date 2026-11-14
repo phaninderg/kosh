@@ -17,7 +17,7 @@
  <div class="card ov-chart" role="group" aria-label="What your assets are made of">
   <h2>What your assets are made of</h2>
   <div class="ov-stack" role="img" aria-label="Share of assets by class">
-   {% for a in assets if a.value > 0 %}<a class="seg c-{{ a.key }}" href="{{ a.href }}" style="flex-grow:{{ a.value|float }}" title="{{ a.label }}: {{ a.value|inr }} ({{ a.share_pct }}%)">{% if a.share_pct and a.share_pct >= 12 %}<span>{{ a.label }} · {{ a.share_pct }}%</span>{% endif %}</a>{% endfor %}
+   {% for a in assets if a.value > 0 %}<a class="seg c-{{ a.key }}" href="{{ a.href }}" style="flex-grow:{{ a.value|float }}" title="{{ a.label }}: {{ a.value|inr }} ({{ a.share_pct }}%)">{% if a.share_pct and a.share_pct >= 12 %}<span><span class="lbl">{{ a.label }} · </span>{{ a.share_pct }}%</span>{% endif %}</a>{% endfor %}
   </div>
   <ul class="ov-legend">
    {% for a in assets %}<li><i class="sw c-{{ a.key }}"></i><span class="nm">{{ a.label }}</span><span class="am">{{ a.value|inr }}</span><span class="pc">{{ (a.share_pct ~ '%') if a.share_pct is not none else '—' }}</span></li>{% endfor %}
