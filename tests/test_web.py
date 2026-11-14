@@ -5,10 +5,13 @@ import finance.web.app as webapp
 from finance.parsers.base import REGISTRY
 from finance.parsers.cas import CasParser
 from tests.conftest import make_cas
+from tests.conftest import PASSWORD
 from tests.mailfix import FakeImap, make_email, make_pdf
 
-TOKEN = "tok"
 
+def _backups():
+    from finance import vault
+    return list((vault.current_vault.get().root / "backups").glob("ledger-*.enc"))
 
 class FakeJobs:
     def __init__(self): self.started = []
@@ -17,29 +20,47 @@ class FakeJobs:
     def start(self, action, params=None):
         self.started.append((action, params)); return "job-1"
     def get(self, jid): return None
+    def log(self, jid, tail=60000): return ""
+
+
+class VaultFile:
+    """Stands in for the mailbox settings file the older tests wrote: the settings now live sealed in the vault."""
+    def __str__(self):
+        from finance import vault
+        return vault.VAULT_FILES
+
+    def write_text(self, text):
+        from finance import vault
+        vault.require_vault().put("mailboxes.json", text.encode())
+
+    def read_text(self):
+        from finance import vault
+        return (vault.require_vault().get("mailboxes.json") or b"").decode()
 
 
 @pytest.fixture
-def client(db_path, tmp_path, monkeypatch):
+def client(db_path, tmp_path, monkeypatch, users, registry, me):
     monkeypatch.setattr(REGISTRY["cas"], "parse",
                         lambda path, password: CasParser().from_casdata(make_cas()), raising=False)
     jobs = FakeJobs()
-    c = TestClient(webapp.create_app(TOKEN, db_path, jobs, mail_config_path=str(tmp_path / "mb.json"),
-                                     imap_connect=lambda h, p: FakeImap({1: make_email(pdf=make_pdf())})),
+    c = TestClient(webapp.create_app(db_path, jobs, imap_connect=lambda h, p: FakeImap({1: make_email(pdf=make_pdf())}),
+                                     users=users, registry=registry),
                    base_url="http://testserver", follow_redirects=False,
                    headers={"origin": "http://testserver"})
-    c.jobs, c.cfg_path = jobs, tmp_path / "mb.json"
+    c.jobs, c.cfg_path, c.me, c.users, c.registry = jobs, VaultFile(), me, users, registry
     return c
 
 
 def authed(c):
-    assert c.get(f"/?token={TOKEN}").status_code == 303
+    """Sign the test profile in by giving the browser its session cookie (the real sign-in flow has its own tests)."""
+    from finance.web import auth
+    c.cookies.set("kosh_session", auth.issue_session(c.me["id"], c.users.get(c.me["id"])["sv"]))
     return c
 
 
-def test_requires_token(client):
+def test_nothing_opens_without_signing_in(client):
     assert client.get("/").status_code == 401
-    assert client.get("/?token=wrong").status_code == 401
+    assert client.get("/", headers={"accept": "text/html"}).status_code == 303
     assert client.get("/", headers={"host": "evil.example"}).status_code == 400
 
 
@@ -128,7 +149,9 @@ def test_mailbox_save_keeps_password_out_of_files_and_pages(client):
     assert r.status_code == 303
     assert secrets.get_secret("imap:gmail-main") == "app-pw-123"
     assert "app-pw-123" not in client.cfg_path.read_text()
-    assert oct(client.cfg_path.stat().st_mode & 0o777) == "0o600"
+    from finance import vault
+    on_disk = b"".join(p.read_bytes() for p in vault.current_vault.get().root.rglob("*") if p.is_file())
+    assert b"gmail-main" not in on_disk and b"app-pw-123" not in on_disk          # settings and secret are sealed
     page = client.get("/mailboxes").text
     assert "gmail-main" in page and "✓ stored" in page and "app-pw-123" not in page
     edit = client.get("/mailboxes?edit=gmail-main").text
@@ -184,13 +207,14 @@ def test_attention_retry_and_dismiss_from_ui(client, db_path, monkeypatch, tmp_p
     assert client.post("/review/999/attention/retry").status_code == 404
 
 
-def test_mailboxes_page_works_on_a_phase1_database(tmp_path, monkeypatch):
+def test_mailboxes_page_works_on_a_phase1_database(tmp_path, monkeypatch, users, registry, me):
     import sqlite3
     from finance import db
     path = str(tmp_path / "p1.db")
     raw = sqlite3.connect(path); raw.executescript(db.SCHEMA); raw.execute("PRAGMA user_version = 1"); raw.commit(); raw.close()
-    c = TestClient(webapp.create_app(TOKEN, path, FakeJobs(), mail_config_path=str(tmp_path / "mb.json")),
-                   base_url="http://testserver", follow_redirects=False)
+    c = TestClient(webapp.create_app(path, FakeJobs(), users=users, registry=registry),
+                   base_url="http://testserver", follow_redirects=False, headers={"origin": "http://testserver"})
+    c.me, c.users = me, users
     authed(c)
     assert c.get("/mailboxes").status_code == 200 and c.get("/review").status_code == 200
 
@@ -260,7 +284,6 @@ def test_rescan_resets_position_and_starts_sync(client, db_path):
 
 def test_duplicate_folio_merge_from_the_ui(client, db_path, tmp_path, monkeypatch):
     from tests.test_duplicates import _scenario
-    monkeypatch.setattr(webapp, "BACKUP_DIR", str(tmp_path / "bk"))
     _scenario(db_path)
     authed(client)
     page = client.get("/review").text
@@ -272,7 +295,7 @@ def test_duplicate_folio_merge_from_the_ui(client, db_path, tmp_path, monkeypatc
     dup_id = next(i["id"] for i in analytics.open_review_items(connect_ro(db_path)) if i["kind"] == "duplicate_folio")
     r = client.post(f"/review/{dup_id}/duplicate/merge")
     assert r.status_code == 200 and "Merged: 0 transaction(s) moved, 3 duplicate(s) dropped" in r.text
-    assert list((tmp_path / "bk").glob("finance-*.db"))                       # backup taken first
+    assert _backups()                                                   # a sealed backup was taken first
     page = client.get("/portfolio").text
     assert "Synthetic Flexi Cap Fund" not in page.split("Redeemed units")[0]    # no longer held ...
     assert "Synthetic Flexi Cap Fund" in page.split("Redeemed units")[1]        # ... but still listed as redeemed
@@ -284,13 +307,12 @@ def test_duplicate_transactions_cleanup_from_the_ui(client, db_path, tmp_path, m
     from finance import analytics
     from finance.db import connect_ro
     from tests.test_duplicates import seed_same_account_duplicates
-    monkeypatch.setattr(webapp, "BACKUP_DIR", str(tmp_path / "bk"))
     seed_same_account_duplicates(db_path)
     authed(client)
     assert "Duplicate transactions" in client.get("/review").text
     item = next(i for i in analytics.open_review_items(connect_ro(db_path)) if i["kind"] == "duplicate_txns")
     r = client.post(f"/review/{item['id']}/duplicate-txns")
-    assert "Removed 3 duplicate transaction(s)" in r.text and list((tmp_path / "bk").glob("finance-*.db"))
+    assert "Removed 3 duplicate transaction(s)" in r.text and _backups()
     assert client.post(f"/review/{item['id']}/duplicate-txns").status_code == 404
 
 
@@ -298,7 +320,6 @@ def test_merge_all_duplicates_button(client, db_path, tmp_path, monkeypatch):
     from finance import analytics
     from finance.db import connect_ro
     from tests.test_duplicates import ALT, _imp
-    monkeypatch.setattr(webapp, "BACKUP_DIR", str(tmp_path / "bk"))
     _imp(db_path, make_cas(), "a"); _imp(db_path, make_cas(folio=ALT), "b")                 # folio X, spelled twice
     _imp(db_path, make_cas(folio="7777777777", variant=2), "c")
     _imp(db_path, make_cas(folio="7777777777 / 0", variant=2), "d")                         # folio Y, spelled twice
@@ -306,7 +327,7 @@ def test_merge_all_duplicates_button(client, db_path, tmp_path, monkeypatch):
     page = client.get("/review").text
     assert "Merge all 2" in page
     r = client.post("/review/merge-all-duplicates")
-    assert "Merged 2 folio pair(s)" in r.text and list((tmp_path / "bk").glob("finance-*.db"))
+    assert "Merged 2 folio pair(s)" in r.text and _backups()
     assert connect_ro(db_path).execute("select count(*) from accounts").fetchone()[0] == 2
     assert not [i for i in analytics.open_review_items(connect_ro(db_path)) if i["kind"] == "duplicate_folio"]
 
@@ -320,16 +341,24 @@ def test_portfolio_warns_when_duplicates_make_totals_unreliable(client, db_path)
     assert "not reliable yet" not in client.get("/portfolio").text
 
 
-def test_startup_scan_flags_but_changes_no_data(db_path, monkeypatch):
+def test_signing_in_flags_duplicates_but_changes_no_data(client, db_path, users, registry, me):
+    import time
     from finance.db import connect_ro
     from finance.ledger import Ledger
     from tests.test_duplicates import seed_same_account_duplicates
-    import finance.web.server as server
     seed_same_account_duplicates(db_path)
     led = Ledger(db_path); led.conn.execute("DELETE FROM review_queue"); led.conn.commit(); led.close()   # as in an old DB
     before = connect_ro(db_path).execute("select count(*) from transactions").fetchone()[0]
-    monkeypatch.setattr("config.DB_PATH", db_path)
-    server.scan_for_duplicates()
+    registry.lock(me["id"])
+    r = client.post("/login", data={"name": "Test Person", "password": PASSWORD})          # unlocking runs the scan
+    assert r.status_code == 303
+    from finance import vault
+    vault.current_vault.set(registry.get(me["id"]))                                        # the freshly unlocked vault
+    for _ in range(50):                                                                    # it runs on a background thread
+        conn = connect_ro(db_path)
+        if conn.execute("select count(*) from review_queue where kind='duplicate_txns' and status='open'").fetchone()[0]:
+            break
+        time.sleep(0.05)
     conn = connect_ro(db_path)
     assert conn.execute("select count(*) from transactions").fetchone()[0] == before
     assert conn.execute("select count(*) from review_queue where kind='duplicate_txns' and status='open'").fetchone()[0] == 1

@@ -1,0 +1,11 @@
+{% extends "auth_base.html" %}{% block title %}Recover{% endblock %}{% block body %}
+<form method="post" action="/recover" class="card" autocomplete="off">
+ <p>Forgot your password? The recovery key you saved when you created your profile resets it and keeps your data.</p>
+ <label for="nm">Your name</label><input id="nm" name="name" value="{{ name or '' }}" required autofocus>
+ <label for="rk">Recovery key</label><input id="rk" name="recovery_key" autocomplete="off" placeholder="ABCD-EFGH-…" required>
+ <label for="pw">New password (12+ characters)</label><input id="pw" name="password" type="password" minlength="12" autocomplete="new-password" required>
+ <label for="cf">New password again</label><input id="cf" name="confirm" type="password" minlength="12" autocomplete="new-password" required>
+ <p><button style="width:100%">Reset password</button></p>
+ <p class="mute small">Lost both the password and the recovery key? Then the data cannot be opened by anyone. Ask the admin to remove your profile and start again.</p>
+ <p class="small"><a href="/login">Back to sign in</a></p>
+</form>{% endblock %}

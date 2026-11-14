@@ -1,0 +1,13 @@
+{% extends "auth_base.html" %}{% block title %}Create your profile{% endblock %}{% block body %}
+<form method="post" action="/signup" class="card" autocomplete="off">
+ {% if not has_users %}<p><b>Welcome.</b> You are the first person here, so you will be the admin. Enter the <b>setup code</b> the server printed when it started (<code>docker logs kosh</code>, or the terminal where you ran <code>python main.py ui</code>).</p>
+ {% else %}<p>Create your own profile with the invite code the admin gave you. Your data is encrypted for you alone: not even the admin can read it.</p>{% endif %}
+ <label for="cd">{{ 'Setup code' if not has_users else 'Invite code' }}</label>
+ <input id="cd" name="code" value="{{ code or '' }}" autocomplete="off" required {{ 'autofocus' if not code }}>
+ <label for="nm">Your name</label><input id="nm" name="name" value="{{ name or '' }}" maxlength="40" autocomplete="username" required>
+ <label for="pw">Password (12+ characters)</label><input id="pw" name="password" type="password" minlength="12" autocomplete="new-password" required>
+ <label for="cf">Password again</label><input id="cf" name="confirm" type="password" minlength="12" autocomplete="new-password" required>
+ <p class="mute small">This password unlocks your data. It cannot be reset without your recovery key, which you will see next.</p>
+ <p><button style="width:100%">Create profile</button></p>
+ {% if has_users %}<p class="small"><a href="/login">I already have a profile</a></p>{% endif %}
+</form>{% endblock %}

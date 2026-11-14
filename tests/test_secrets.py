@@ -1,70 +1,55 @@
-import keyring
+"""Secrets live in the signed-in profile's vault, and only there."""
 
-from finance import secrets
-from tests.conftest import MemKeyring
+import json
 
+import pytest
 
-def test_keyring_then_env_fallback(monkeypatch):
-    kr = MemKeyring(); keyring.set_keyring(kr)
-    monkeypatch.delenv("KOSH_ID_PAN", raising=False)
-    monkeypatch.delenv("PF_ID_PAN", raising=False)
-    assert secrets.get_secret("id:pan") is None and not secrets.has_secret("id:pan")
-    monkeypatch.setenv("KOSH_ID_PAN", "ENVPAN")
-    assert secrets.get_secret("id:pan") == "ENVPAN"
-    secrets.set_secret("id:pan", "KEYRINGPAN")
-    assert secrets.get_secret("id:pan") == "KEYRINGPAN"          # keyring wins
-    secrets.delete_secret("id:pan")
-    assert secrets.get_secret("id:pan") == "ENVPAN"
+from finance import secrets, vault
 
 
-def test_the_old_cas_password_name_and_env_still_fill_the_default_password(monkeypatch):
-    keyring.set_keyring(MemKeyring())
-    monkeypatch.delenv("KOSH_ID_CAS_PASSWORD", raising=False)
-    monkeypatch.delenv("PF_ID_CAS_PASSWORD", raising=False)
-    monkeypatch.setenv("CAS_PASSWORD", "legacy")
-    assert secrets.get_secret("id:password") == "legacy"
-    monkeypatch.delenv("CAS_PASSWORD")
-    secrets.set_secret("id:cas_password", "stored-under-the-old-name")
-    assert secrets.get_secret("id:password") == "stored-under-the-old-name"
-
-
-def test_entries_saved_by_the_predecessor_are_still_read_but_new_ones_win(monkeypatch):
-    kr = MemKeyring(); keyring.set_keyring(kr)
-    for k in ("KOSH_IMAP_ME", "PF_IMAP_ME"):
-        monkeypatch.delenv(k, raising=False)
-    kr.set_password(secrets.LEGACY_SERVICE, "imap:me", "old-app-password")           # saved before the rename
-    assert secrets.get_secret("imap:me") == "old-app-password"
-    secrets.set_secret("imap:me", "new-app-password")                                # saved by this app
-    assert secrets.get_secret("imap:me") == "new-app-password"
-    assert kr.get_password(secrets.LEGACY_SERVICE, "imap:me") == "old-app-password"  # the old entry is never rewritten
-    assert kr.get_password(secrets.SERVICE, "imap:me") == "new-app-password"
-
-
-def test_deleting_a_secret_removes_it_from_the_old_entry_too(monkeypatch):
-    kr = MemKeyring(); keyring.set_keyring(kr)
-    monkeypatch.delenv("KOSH_ID_EXTRA_PASSWORDS", raising=False)
-    monkeypatch.delenv("PF_ID_EXTRA_PASSWORDS", raising=False)
-    kr.set_password(secrets.LEGACY_SERVICE, "id:extra_passwords", '["x"]')
-    secrets.delete_secret("id:extra_passwords")
-    assert secrets.get_secret("id:extra_passwords") is None
-
-
-def test_the_old_environment_prefix_is_still_read(monkeypatch):
-    keyring.set_keyring(MemKeyring())
-    monkeypatch.delenv("KOSH_ID_MOBILE", raising=False)
-    monkeypatch.setenv("PF_ID_MOBILE", "9999999999")
-    assert secrets.get_secret("id:mobile") == "9999999999"
-    monkeypatch.setenv("KOSH_ID_MOBILE", "8888888888")
-    assert secrets.get_secret("id:mobile") == "8888888888"                           # the new prefix wins
-
-
-def test_file_store_for_containers_keeps_secrets_in_a_private_file(monkeypatch, tmp_path):
-    import stat
-    path = tmp_path / "secrets.json"
-    monkeypatch.setenv("KOSH_SECRET_STORE", "file")
-    monkeypatch.setattr(secrets, "_FileStore", lambda _p, real=secrets._FileStore: real(path))
+def test_a_secret_round_trips_and_is_gone_after_delete():
     secrets.set_secret("imap:work", "app-pw")
     assert secrets.get_secret("imap:work") == "app-pw" and secrets.has_secret("imap:work")
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
     secrets.delete_secret("imap:work")
-    assert secrets.get_secret("imap:work") is None
+    assert secrets.get_secret("imap:work") is None and not secrets.has_secret("imap:work")
+    secrets.delete_secret("never-set")                                         # deleting what is not there is fine
+
+
+def test_secrets_are_sealed_on_disk(me):
+    secrets.set_secret("id:pan", "ABCDE1234F")
+    v = vault.current_vault.get()
+    blob = b"".join(p.read_bytes() for p in (v.root / "f").glob("*.enc"))
+    assert b"ABCDE1234F" not in blob and b"id:pan" not in blob and blob.startswith(vault.MAGIC)
+
+
+def test_environment_variables_and_the_old_keyring_names_are_not_consulted(monkeypatch):
+    """A variable on the server would be shared by every profile, so nothing is read from the environment."""
+    monkeypatch.setenv("KOSH_IMAP_WORK", "from-env")
+    monkeypatch.setenv("KOSH_ID_PAN", "from-env")
+    monkeypatch.setenv("CAS_PASSWORD", "from-env")
+    assert secrets.get_secret("imap:work") is None and secrets.get_secret("id:pan") is None
+    assert secrets.get_secret("id:password") is None
+
+
+def test_outside_a_signed_in_context_nothing_is_readable_and_nothing_can_be_written():
+    token = vault.current_vault.set(None)
+    try:
+        assert secrets.get_secret("id:pan") is None and not secrets.has_secret("id:pan")
+        with pytest.raises(vault.VaultLocked):
+            secrets.set_secret("id:pan", "x")
+        secrets.delete_secret("id:pan")
+    finally:
+        vault.current_vault.reset(token)
+
+
+def test_two_profiles_never_see_each_others_secrets(users, registry):
+    secrets.set_secret("id:pan", "MINE")
+    other, dek, _ = users.sign_up("Other Person", "another long password", users.make_invite())
+    token = vault.current_vault.set(registry.unlock(other["id"], dek))
+    try:
+        assert secrets.get_secret("id:pan") is None
+        secrets.set_secret("id:pan", "THEIRS")
+        assert secrets.get_secret("id:pan") == "THEIRS"
+    finally:
+        vault.current_vault.reset(token)
+    assert secrets.get_secret("id:pan") == "MINE"

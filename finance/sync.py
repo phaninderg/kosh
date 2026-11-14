@@ -15,7 +15,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from config import DB_PATH, INBOX_DIR
+from finance import vault
+from finance.blobs import Blobs
 from finance.ledger import Ledger
 from finance.mailconfig import MailConfig, MailboxAccount, SenderRule, load_config
 from finance.models import SourceDocument
@@ -80,9 +81,9 @@ class SyncRunner:
     def __init__(self, db_path: str | None = None, config: MailConfig | None = None,
                  source_factory: Callable = _default_factory, identity: Identity | None = None,
                  inbox_dir: str | None = None, log: Callable[[str], None] = print):
-        self.db_path, self.cfg = db_path or DB_PATH, config or load_config()
+        self.db_path, self.cfg = db_path or vault.VAULT_DB, config or load_config()
         self.source_factory, self.identity = source_factory, identity or Identity()
-        self.inbox = Path(inbox_dir or INBOX_DIR)
+        self.inbox = Blobs(inbox_dir or vault.VAULT_FILES, prefix="inbox/")
         self.log = log
 
     # ── full sync ─────────────────────────────────────────────────────────────
@@ -177,7 +178,7 @@ class SyncRunner:
             res = self._import(ledger, stmt, doc)
         except ValueError as exc:                               # e.g. the balance check refused the statement
             return self._attention(ledger, doc, rule, f"{rule.parser}: {str(exc)[:300]}", s)
-        (self.inbox / f"{doc.sha256}.pdf").unlink(missing_ok=True)
+        self.inbox.delete(f"{doc.sha256}.pdf")
         if unlocked.card4:
             self.identity.remember_card4(unlocked.card4)
         if unlocked.template:
@@ -199,12 +200,8 @@ class SyncRunner:
 
     def _attention(self, ledger: Ledger, doc: SourceDocument, rule: SenderRule, reason: str,
                    s: AccountSummary) -> str:
-        self.inbox.mkdir(parents=True, exist_ok=True)
-        path = self.inbox / f"{doc.sha256}.pdf"
-        if not path.exists():                                   # keep the (still encrypted) file so Retry works offline
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT, 0o600)
-            with os.fdopen(fd, "wb") as f:
-                f.write(doc.data)
+        if not self.inbox.exists(f"{doc.sha256}.pdf"):          # keep the file (still locked, and now sealed) so Retry works offline
+            self.inbox.write(f"{doc.sha256}.pdf", doc.data)
         ledger.record_attention(sha256=doc.sha256, message_id=doc.message_id, sender=doc.sender,
                                 parser=rule.parser, reason=reason, meta=self._meta(doc))
         s.attention += 1
@@ -214,21 +211,21 @@ class SyncRunner:
 
     def retry(self, doc_id: int, password: str | None = None, remember: bool = False) -> str:
         """Re-run a queued document offline. `password` is a one-off literal tried first; it lives in
-        memory only unless `remember` is set AND it actually opened the file (then it goes to the keyring)."""
+        memory only unless `remember` is set AND it actually opened the file (then it goes to the vault)."""
         ledger = Ledger(self.db_path)
         try:
             row = ledger.document(doc_id)
             if not row or row["status"] != "needs_attention":
                 return "not waiting for attention"
-            path = self.inbox / f"{row['sha256']}.pdf"
-            if not path.exists():
+            saved = self.inbox.read(f"{row['sha256']}.pdf")
+            if saved is None:
                 return "the saved PDF is gone; re-sync after resetting the mailbox, or dismiss"
             rule = next((r for a in self.cfg.accounts for r in a.senders if r.matches(row["sender"])),
                         SenderRule(match=(row["sender"] or "unknown.invalid"), parser=row["parser"] or "cas"))
             doc = SourceDocument(account=row["account"], message_id=row["message_id"], sender=row["sender"],
                                  subject=row["subject"], filename=row["filename"], sha256=row["sha256"],
                                  folder=row["folder"], uid=row["uid"], received_at=row["received_at"],
-                                 auth=row["auth"], data=path.read_bytes())
+                                 auth=row["auth"], data=saved)
             s = AccountSummary("retry")
             decrypt = DecryptAgent(self.identity, ledger.password_templates(), ledger.card_last4s())
             outcome = self._process(ledger, decrypt, doc, rule, s, retry=True,
@@ -255,6 +252,6 @@ class SyncRunner:
             row = ledger.document(doc_id)
             ledger.dismiss_attention(doc_id)
             if row:
-                (self.inbox / f"{row['sha256']}.pdf").unlink(missing_ok=True)
+                self.inbox.delete(f"{row['sha256']}.pdf")
         finally:
             ledger.close()

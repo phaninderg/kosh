@@ -1,0 +1,45 @@
+{% extends "base.html" %}{% block body %}
+<h1>Account</h1>
+{% if notice %}<div class="flash ok">{{ notice }}</div>{% endif %}{% if error %}<div class="flash err" role="alert">{{ error }}</div>{% endif %}
+<div class="card"><h2 class="sec">{{ user.name }} <span class="mute small">· {{ 'admin' if user.role == 'admin' else 'member' }}</span></h2>
+ <p class="mute">Everything you import and store here (your ledger, statements, mailbox settings and saved secrets) is encrypted with a key that only your password and your recovery key can open. Other people on this server, including the admin, cannot read it.</p>
+ <div class="row" style="display:flex;gap:10px;flex-wrap:wrap">
+  <form method="post" action="/lock"><button class="sec" title="Re-lock your data now; your password is needed to open it again">Lock my data now</button></form>
+  <form method="post" action="/logout"><button class="sec">Sign out of this device</button></form>
+  <form method="post" action="/logout"><input type="hidden" name="everywhere" value="1"><button class="sec">Sign out everywhere</button></form>
+ </div></div>
+
+<div class="card"><h2 class="sec">Passkeys</h2>
+ <p class="mute">Sign in with Face ID, a fingerprint or a security key instead of typing your password. A passkey does not unlock your data by itself: after a server restart you still enter your password once.</p>
+ {% if passkeys %}<table><tr><th>Name</th><th>Added</th><th>Last used</th><th></th></tr>
+ {% for pk in passkeys %}<tr><td>{{ pk.name }}</td><td>{{ pk.created|int|ts_epoch }}</td><td>{{ pk.last_used|int|ts_epoch if pk.last_used else 'never' }}</td>
+  <td><form method="post" action="/account/passkeys/remove"><input type="hidden" name="id" value="{{ pk.id }}"><button class="sec">Remove</button></form></td></tr>{% endfor %}</table>
+ {% else %}<p class="mute">No passkeys yet.</p>{% endif %}
+ {% if fresh %}
+  <p><label for="pkn">Name for this device</label><input id="pkn" value="" placeholder="e.g. My phone" maxlength="40"></p>
+  <button type="button" data-passkey="add" data-name-from="pkn" hidden>Add a passkey on this device</button>
+  <p class="mute small" id="pk-msg" role="status"></p>
+  <form method="post" action="/account/device-code" style="margin-top:14px"><button class="sec">Make a code to add a passkey on another device</button></form>
+  {% if device_code %}<p>Enter this code on the other device's sign-in page (<i>Add a passkey on this device with a code</i>). It works once, for ten minutes:</p><p class="recovery">{{ device_code }}</p>{% endif %}
+ {% else %}<p class="mute">To add or remove a passkey, <a href="/logout" onclick="event.preventDefault();document.getElementById('so').submit()">sign in again</a> first (a sign-in from the last ten minutes is needed).</p>
+  <form id="so" method="post" action="/logout" hidden></form>{% endif %}
+</div>
+
+<div class="card"><h2 class="sec">Change password</h2>
+ <form method="post" action="/account/password" autocomplete="off">
+  <label for="cur">Current password</label><input id="cur" name="current" type="password" autocomplete="current-password" required>
+  <label for="nw">New password (12+ characters)</label><input id="nw" name="new" type="password" minlength="12" autocomplete="new-password" required>
+  <label for="cn">New password again</label><input id="cn" name="confirm" type="password" minlength="12" autocomplete="new-password" required>
+  <p><button>Change password</button> <span class="mute small">Other devices are signed out. Your data is re-protected, not lost.</span></p></form></div>
+
+<div class="card"><h2 class="sec">Recovery key</h2>
+ <p class="mute">Lost your recovery key, or want a fresh one? Make a new one (the old one stops working). You will see it once.</p>
+ <form method="post" action="/account/recovery-key" autocomplete="off"><label for="cur2">Current password</label><input id="cur2" name="current" type="password" autocomplete="current-password" required>
+  <p><button class="sec">Make a new recovery key</button></p></form></div>
+
+{% if activity %}<div class="card wrap"><h2 class="sec">Your recent sign-in activity</h2>
+ <p class="mute">Newest first, in your local time. Anything here you do not recognise means your password may be known: change it and sign out everywhere.</p>
+ <table><tr><th>When</th><th>What</th><th>From</th></tr>
+ {% for e in activity %}<tr><td>{{ e.at|ts }}</td><td class="{{ 'good' if e.ok else 'bad' }}">{{ e.event }}</td><td class="mute">{{ e['from'] or '—' }}</td></tr>{% endfor %}</table></div>{% endif %}
+<script src="/static/passkey.js"></script>
+{% endblock %}

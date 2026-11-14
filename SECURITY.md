@@ -34,45 +34,56 @@ days, not hours, and no bounty.
 
 ## Security model
 
-### Two ways to run it
+### Your data is encrypted for you alone
 
-- **Local (default).** Listens on `127.0.0.1` only. A random token is printed at start, becomes a cookie on first use, and is
-  required for every request. The Host header is checked (DNS rebinding), and forms must come from the same site.
-- **Hosted (`KOSH_AUTH=login`).** For a server you reach from your phone. It refuses to start without a password and
-  without `KOSH_ALLOWED_HOSTS`, and it answers only to the domains you list.
+- Every profile has its own random 256-bit data key. The ledger, saved secrets (mailbox app passwords, name, PAN, date of birth,
+  PDF passwords), mailbox settings, uploaded statements, job logs and backups are sealed with **AES-256-GCM** under it; file
+  names on disk are opaque and each file is bound to its name, so swapping files fails.
+- The key is stored only **wrapped** under keys derived (scrypt, N=2^15) from the person's password and from a one-time recovery
+  key. The right password both proves who you are and unwraps the key. There is no admin override and no server-wide key.
+- The unwrapped key lives only in memory, while the person is unlocked. It is dropped on lock, after 8 idle hours
+  (`KOSH_IDLE_LOCK_HOURS`), on **Sign out everywhere**, when a profile is disabled, and on restart. A passkey signs you in but
+  cannot unlock data by itself; the password does.
+- So the admin, other profiles, and anyone who copies the data folder or a backup get ciphertext. `data/users.json` holds
+  display names, roles, wrapped keys and public passkey records, and no financial data.
 
-### Hosted sign-in
+### Profiles
 
-- **Password** (12+ characters) stored only as a salted scrypt hash (N=2^14, r=8, p=1); checked in constant time, off the
-  event loop, and never more than two at once, so a flood of sign-in attempts cannot be used to exhaust the CPU.
-- **Authenticator code** (RFC 6238, 6 digits) on by default. A code is spent only by a correct password and works once.
-- **Throttling.** Five wrong guesses from an address lock it out, the lock doubling up to an hour; an IPv6 address counts as
-  its /64 and an IPv4-mapped one as the IPv4 address; a global cap of 30 failures an hour stops many addresses sharing the work.
-- **Sessions** are a signed cookie (HMAC-SHA256 under a random key in `data/.session_key`, mode 0600) valid for 30 days. It is
-  bound to the current password and authenticator secret, so changing either signs every device out; **Sign out everywhere**
-  replaces the key. The cookie is `HttpOnly` and `SameSite=Strict`; on HTTPS it is `Secure` and named `__Host-kosh_session`,
-  which makes the browser itself reject a sibling subdomain's attempt to plant a shadowing cookie. If the same cookie name
-  arrives twice with different values, both are refused.
-- **Activity log.** `data/audit.log` (mode 0600, last 500 lines) records sign-ins, failures, lock-outs and sign-outs with the
-  address, never a secret. The Identity page shows the latest.
-- Every response carries `Cache-Control: no-store`, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`,
-  `Referrer-Policy: no-referrer` and a Content-Security-Policy (`default-src 'self'`, no framing, forms to self only); HTTPS
-  responses add HSTS.
-- The installed phone app caches only its stylesheet, scripts and icons. Pages, balances and transactions are never stored
-  on the device; offline you see a notice.
+- The first profile needs a **setup code** the server prints once at start-up and becomes the admin; everyone else needs a
+  one-time **invite code** (60 bits, stored hashed, 7 days). The admin can invite, disable and remove people (removal deletes
+  that profile's data for good, after typing their name) and cannot read anyone's data. The last admin cannot be removed.
+- Job ids, logs and settings are scoped to the profile that created them.
 
-### Data and secrets
+### Signing in
 
-- Statements are parsed locally; nothing is sent to any service. IMAP access is read-only and verifies the server's certificate.
-- Mailbox app passwords and identity details live in the OS keyring, or in `data/secrets.json` (mode 0600) in a container.
-- Uploads are limited to 50 MB, 25 files, and must start with `%PDF`; the client's file name is never used as a path.
+- **Passkeys** (WebAuthn, discoverable credentials, user verification required, attestation none), verified server-side with a
+  signature-counter check; challenges are single-use and bound to their ceremony. Adding or removing a passkey needs a sign-in
+  from the last ten minutes; another device can add one with a one-time, ten-minute, single-use code.
+- **Password** (12+ characters), checked by unwrapping the key (a wrong password fails the GCM tag), off the event loop, two at a
+  time. A forgotten password is reset with the **recovery key**, which is then replaced.
+- **Throttling:** five wrong guesses from an address lock it out, doubling up to an hour; IPv6 counts as its /64; a global cap of
+  30 failures an hour. Unknown names cost the same work as wrong passwords.
+- **Sessions:** a signed cookie (HMAC-SHA256, key in `data/.session_key`, mode 0600) naming the profile and a session version;
+  changing the password, **Sign out everywhere** or disabling a profile ends every cookie. HttpOnly, SameSite=Strict; on HTTPS
+  Secure and named `__Host-kosh_session`. Duplicate cookies with different values are both refused.
+- **Activity log** (`data/audit.log`, mode 0600, last 1000 lines): who, what, success, address; never a secret.
+- Every response: `Cache-Control: no-store`, a Content-Security-Policy, `X-Frame-Options: DENY`, `nosniff`, `no-referrer`; HSTS on
+  HTTPS. Forms must come from the same site; the app answers only to its configured hosts.
+- The installed phone app caches only its stylesheet, scripts and icons, never pages or figures.
+
+### Data and network
+
+- Statements are parsed locally; nothing is sent anywhere. IMAP is read-only and verifies the server's certificate.
+- Uploads: 50 MB per file, 25 files, `%PDF` magic only; the client's file name is never used as a path.
 
 ### What it does not do (read this before hosting)
 
-- **The ledger and the secrets file are not encrypted at rest.** Whoever controls the server can read them. Use a host you
-  trust, full-disk encryption, and SSH keys only.
-- A mailbox app password on a server is a credential an attacker with the server could use. Use a revocable one, or skip
-  mailbox sync and upload statements by hand.
+- **A compromised running server can read data while a profile is unlocked** (the key is in memory then). Encryption protects data
+  at rest, backups and other profiles. Use a host you trust, keep it patched, and use a short idle timeout.
+- **Losing both the password and the recovery key loses the data**, by design.
+- A mailbox app password saved in an unlocked profile could be used by someone who controls the running server. Use a
+  revocable one, or skip mailbox sync.
+- A statement is written to a temporary file for the moment it is parsed.
+- `data/users.json` and `audit.log` hold display names and sign-in events in the clear.
 - The Content-Security-Policy still allows inline scripts and styles (the templates use them). A nonce-based policy is on the
   [ROADMAP](ROADMAP.md).
-- Passkeys (Face ID, fingerprint) are planned and not built yet; today the sign-in is password plus an authenticator code.

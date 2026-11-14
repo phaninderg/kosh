@@ -39,8 +39,7 @@ def test_overlapping_statement_adds_only_new_txns(db_path):
 
 def test_full_folio_number_never_stored(db_path):
     _import(db_path, make_cas(), "x")
-    raw = sqlite3.connect(db_path)
-    dump = "\n".join(raw.iterdump())
+    dump = "\n".join(connect_ro(db_path).iterdump())
     assert FOLIO not in dump
     assert "…7890" in dump                                # last 4 only
     assert "Test Person" not in dump and "t@example.invalid" not in dump

@@ -1,0 +1,25 @@
+{% extends "base.html" %}{% block body %}
+<h1>People</h1>
+{% if notice %}<div class="flash ok">{{ notice }}</div>{% endif %}{% if error %}<div class="flash err" role="alert">{{ error }}</div>{% endif %}
+<div class="card"><p class="mute">You are the admin. You can invite people, disable them, or remove them. You <b>cannot</b> see anyone's money, statements, mailboxes or settings: each person's data is encrypted with a key only they can open, and there is no admin override or password reset that preserves data. (A forgotten password is fixed with the person's own recovery key.)</p></div>
+
+<div class="card wrap"><h2 class="sec">Profiles</h2>
+ <table><tr><th>Name</th><th>Role</th><th>Joined</th><th>Last seen</th><th>Passkeys</th><th>Data</th><th></th></tr>
+ {% for p in people %}<tr><td>{{ p.name }}{% if p.disabled %} <span class="mute">(disabled)</span>{% endif %}</td><td>{{ p.role }}</td><td>{{ p.created|int|ts_epoch }}</td>
+  <td>{{ p.last_seen|int|ts_epoch if p.last_seen else '—' }}</td><td>{{ p.passkeys|length }}</td><td>{{ 'unlocked' if p.unlocked else 'locked' }}</td>
+  <td>{% if p.id != me.id %}<form method="post" action="/admin/users/{{ p.id }}/{{ 'enable' if p.disabled else 'disable' }}" style="display:inline"><button class="sec">{{ 'Enable' if p.disabled else 'Disable' }}</button></form>
+   <details style="display:inline"><summary class="mute small" style="display:inline">remove…</summary>
+    <form method="post" action="/admin/users/{{ p.id }}/delete"><label>Type “{{ p.name }}” to delete this profile and all its data for good</label><input name="confirm" autocomplete="off"><button class="sec">Delete forever</button></form></details>{% else %}<span class="mute">you</span>{% endif %}</td></tr>{% endfor %}</table></div>
+
+<div class="card"><h2 class="sec">Invite someone</h2>
+ <p class="mute">Nobody can create a profile without a one-time invite code. Each code works once and expires in 7 days. Give it to them yourself (a message, in person); it is shown only now.</p>
+ <form method="post" action="/admin/invite" class="row"><div><label>Who is it for? (a note for you only)</label><input name="note" maxlength="60" placeholder="e.g. Asha"></div><button>Create invite code</button></form>
+ {% if new_invite %}<p>Invite code:</p><p class="recovery">{{ new_invite }}</p><p class="mute small">They open <b>/signup</b> on this server and enter it.</p>{% endif %}
+ {% if invites %}<table><tr><th>Note</th><th>Created</th><th>Expires</th><th>State</th><th></th></tr>
+ {% for i in invites %}<tr><td>{{ i.note or '—' }}</td><td>{{ i.created|int|ts_epoch }}</td><td>{{ i.expires|int|ts_epoch }}</td><td>{{ i.state }}</td>
+  <td>{% if i.state == 'open' %}<form method="post" action="/admin/invite/{{ i.hash }}/revoke"><button class="sec">Revoke</button></form>{% endif %}</td></tr>{% endfor %}</table>{% endif %}</div>
+
+{% if activity %}<div class="card wrap"><h2 class="sec">Sign-in activity (everyone)</h2>
+ <table><tr><th>When</th><th>Who</th><th>What</th><th>From</th></tr>
+ {% for e in activity %}<tr><td>{{ e.at|ts }}</td><td>{{ e.who or '—' }}</td><td class="{{ 'good' if e.ok else 'bad' }}">{{ e.event }}</td><td class="mute">{{ e['from'] or '—' }}</td></tr>{% endfor %}</table></div>{% endif %}
+{% endblock %}

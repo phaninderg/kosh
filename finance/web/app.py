@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import os
 import re
-import secrets
 import tempfile
+import time
+from types import SimpleNamespace
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -17,14 +18,14 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Red
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from config import ALLOWED_HOSTS, AUTH_MODE, BACKUP_DIR, CAS_PASSWORD, DB_PATH, MAIL_CONFIG_PATH, PUBLIC_PORT, UI_HOST, UI_PORT
+from config import ALLOWED_HOSTS, PUBLIC_PORT, UI_HOST, UI_PORT
 from finance import analytics
 from finance.db import connect_ro
 from finance.jobs import ACTION_INFO, JobManager
-from finance.web import auth as auth_mod, pwa
+from finance import users as users_mod, vault
+from finance.web import accounts, auth as auth_mod, pwa
 
 HERE = Path(__file__).parent
-COOKIE = f"kosh_session_{PUBLIC_PORT}"        # browsers share cookies across ports of one host; the port in the name keeps other localhost services' from clashing
 
 
 def today() -> date:
@@ -58,24 +59,36 @@ CSP = ("default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 
 ANONYMOUS_PATHS = {"/manifest.webmanifest", "/sw.js"}          # fetched by the browser without cookies; contain nothing private
 
 
-def create_app(token: str, db_path: str = DB_PATH, jobs: JobManager | None = None,
-               mail_config_path: str = MAIL_CONFIG_PATH, imap_connect=None, auth: str = AUTH_MODE,
-               credentials=auth_mod.load_credentials, extra_hosts: list[str] | None = None) -> FastAPI:
+def create_app(db_path: str = vault.VAULT_DB, jobs: JobManager | None = None, mail_config_path: str = vault.VAULT_FILES,
+               imap_connect=None, users: users_mod.Users | None = None, registry: vault.Registry | None = None,
+               extra_hosts: list[str] | None = None) -> FastAPI:
+    """Every page except the sign-in pages needs a signed-in profile whose data is unlocked; the ledger, secrets and mailbox
+    settings that a request reads and writes are that profile's own, sealed in its vault."""
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     templates = Jinja2Templates(directory=str(HERE / "templates"))
     templates.env.filters["inr"] = inr
     templates.env.filters["ts"] = ts
+    templates.env.filters["ts_epoch"] = lambda v: ts(time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(int(v)))) if v else Markup("—")
     jobs = jobs or JobManager()
+    users, registry = users or users_mod.Users(), registry or vault.Registry()
+    throttle, challenges = auth_mod.Throttle(), accounts.Challenges()
     allowed_hosts = {f"{h}:{p}" for h in (UI_HOST, "localhost", "127.0.0.1") for p in (UI_PORT, PUBLIC_PORT)} | {"testserver"}
     allowed_hosts |= set(ALLOWED_HOSTS if extra_hosts is None else extra_hosts)       # the domain a hosted instance answers to
-    login_mode = auth == "login"
-    throttle, totp = auth_mod.Throttle(), auth_mod.TotpVerifier()
-
-    def session_token(request: Request) -> str:
-        return auth_mod.cookie_value(request.headers.get("cookie", ""), auth_mod.cookie_name(request.url.scheme == "https"))
     pwa.register(app)
 
     app.mount("/static", StaticFiles(directory=str(HERE / "static")), name="static")
+
+    # pages anyone may open: signing in or up, recovering, and the files a browser fetches without cookies
+    open_paths = {"/login", "/signup", "/recover", "/auth/passkey/login/options", "/auth/passkey/login/verify",
+                  "/auth/link/options", "/auth/link/verify", "/logout"}
+    # pages a signed-in person may use while their data is still locked
+    locked_paths = {"/unlock", "/lock", "/logout"}
+
+    def sign_in_target(request: Request) -> RedirectResponse | PlainTextResponse:
+        if request.method == "GET" and "text/html" in request.headers.get("accept", ""):
+            target = request.url.path + (f"?{request.url.query}" if request.url.query else "")
+            return RedirectResponse("/signup" if not users.has_users() else f"/login?{urlencode({'next': target})}", status_code=303)
+        return PlainTextResponse("sign in required", status_code=401)
 
     async def check(request: Request, call_next):
         path = request.url.path
@@ -85,29 +98,34 @@ def create_app(token: str, db_path: str = DB_PATH, jobs: JobManager | None = Non
             origin = request.headers.get("origin") or request.headers.get("referer")
             if not origin or urlparse(origin).netloc.lower() != request.headers["host"].lower():   # a browser always sends one
                 return PlainTextResponse("bad origin", status_code=403)
-        if path in ANONYMOUS_PATHS or path.startswith("/static/icons/"):
+        if path in ANONYMOUS_PATHS or path.startswith("/static/"):
             return await call_next(request)
-        if login_mode:
-            creds = credentials()
-            if creds is None:
-                return PlainTextResponse("No password is set. Run `python main.py set-password`.", status_code=503)
-            if path == "/login" or path.startswith("/static/"):            # the login page needs its stylesheet
-                return await call_next(request)
-            if auth_mod.session_valid(session_token(request), creds):
+        session = auth_mod.read_session(auth_mod.cookie_value(request.headers.get("cookie", ""),
+                                                              auth_mod.cookie_name(request.url.scheme == "https")))
+        user = users.get(session[0]) if session else None
+        if user and (user["disabled"] or user["sv"] != session[1]):
+            user = None                                                   # signed out everywhere, password changed, or disabled
+        if path in open_paths and not (user and path in ("/login", "/signup")):
+            if user:
+                request.state.user = user
+            return await call_next(request)
+        if not user:
+            return sign_in_target(request)
+        request.state.user = user
+        if path in ("/login", "/signup"):                               # already signed in
+            return RedirectResponse("/", status_code=303)
+        unlocked = registry.get(user["id"])
+        if not unlocked:
+            if path in locked_paths:
                 return await call_next(request)
             if request.method == "GET" and "text/html" in request.headers.get("accept", ""):
-                target = path + (f"?{request.url.query}" if request.url.query else "")
-                return RedirectResponse(f"/login?{urlencode({'next': target})}", status_code=303)
-            return PlainTextResponse("sign in required", status_code=401)
-        supplied = request.query_params.get("token")
-        if supplied and secrets.compare_digest(supplied, token):
-            resp = RedirectResponse(request.url.path, status_code=303)
-            resp.set_cookie(COOKIE, token, httponly=True, samesite="strict")
-            return resp
-        if not secrets.compare_digest(request.cookies.get(COOKIE, ""), token):
-            return PlainTextResponse("Open the URL printed by `python main.py ui` (it carries the access token).",
-                                     status_code=401)
-        return await call_next(request)
+                return RedirectResponse(f"/unlock?{urlencode({'next': path})}", status_code=303)
+            return PlainTextResponse("data is locked: unlock it with your password", status_code=423)
+        token = vault.current_vault.set(unlocked)                        # from here on, "the database" means this person's
+        try:
+            return await call_next(request)
+        finally:
+            vault.current_vault.reset(token)
 
     @app.middleware("http")
     async def guard(request: Request, call_next):
@@ -122,64 +140,6 @@ def create_app(token: str, db_path: str = DB_PATH, jobs: JobManager | None = Non
             resp.headers["Strict-Transport-Security"] = "max-age=31536000"
         return resp
 
-    # ── login (hosted instances only) ─────────────────────────────────────────────
-
-    def login_page(request: Request, *, error: str = "", next_: str = "/", status: int = 200):
-        creds = credentials()
-        return templates.TemplateResponse(request, "login.html", {"error": error, "next": next_,
-                                          "needs_code": bool(creds and creds[1])}, status_code=status)
-
-    if login_mode:
-        @app.get("/login", response_class=HTMLResponse)
-        def login_form(request: Request, next: str = "/"):
-            creds = credentials()
-            if creds and auth_mod.session_valid(session_token(request), creds):
-                return RedirectResponse(auth_mod.safe_next(next), status_code=303)
-            return login_page(request, next_=auth_mod.safe_next(next))
-
-        @app.post("/login", response_class=HTMLResponse)
-        async def login_submit(request: Request):
-            form = await request.form()
-            target = auth_mod.safe_next(str(form.get("next", "/")))
-            client = auth_mod.client_key(request.client.host if request.client else "unknown")
-            wait = throttle.retry_after(client)
-            if wait:
-                auth_mod.audit("sign-in refused: too many attempts", False, client)
-                resp = login_page(request, error=f"Too many attempts. Try again in {-(-wait // 60)} minute(s).",
-                                  next_=target, status=429)
-                resp.headers["Retry-After"] = str(wait)
-                return resp
-            creds = credentials()
-            try:
-                password_ok = await auth_mod.check_password(str(form.get("password", "")), creds[0])
-            except auth_mod.Busy:
-                return login_page(request, error="The server is busy checking other sign-ins. Try again in a moment.",
-                                  next_=target, status=503)
-            code_ok = password_ok and (creds[1] is None or totp.verify(creds[1], str(form.get("code", ""))))   # a code is spent only by a correct password
-            if not (password_ok and code_ok):                         # one message for every kind of failure
-                throttle.failed(client)
-                auth_mod.audit("sign-in failed", False, client)
-                return login_page(request, error="Incorrect password or code.", next_=target, status=401)
-            throttle.succeeded(client)
-            auth_mod.audit("signed in", True, client)
-            secure = request.url.scheme == "https"
-            resp = RedirectResponse(target, status_code=303)
-            resp.set_cookie(auth_mod.cookie_name(secure), auth_mod.issue_session(creds), max_age=auth_mod.SESSION_SECONDS,
-                            httponly=True, samesite="strict", secure=secure, path="/")
-            return resp
-
-        @app.post("/logout")
-        async def logout(request: Request):
-            everywhere = bool((await request.form()).get("everywhere"))
-            if everywhere:
-                auth_mod.rotate_session_key()                          # every phone and browser must sign in again
-            auth_mod.audit("signed out everywhere" if everywhere else "signed out", True,
-                           auth_mod.client_key(request.client.host if request.client else "unknown"))
-            secure = request.url.scheme == "https"
-            resp = RedirectResponse("/login", status_code=303)
-            resp.delete_cookie(auth_mod.cookie_name(secure), path="/", secure=secure, httponly=True, samesite="strict")
-            return resp
-
     def open_review_count() -> int:
         conn = connect_ro(db_path)
         try:
@@ -187,9 +147,33 @@ def create_app(token: str, db_path: str = DB_PATH, jobs: JobManager | None = Non
         finally:
             conn.close()
 
-    def render(request: Request, name: str, **ctx):
+    def render(request: Request, name: str, status_code: int = 200, **ctx):
         return templates.TemplateResponse(request, name, {"mb": make_labeler(), "review_open": open_review_count(),
-                                                          "login_mode": login_mode, **ctx})
+                                                          "me": request.state.user, **ctx}, status_code=status_code)
+
+    def after_unlock(v: vault.Vault) -> None:
+        """Queue (never apply) duplicate-folio / duplicate-transaction findings so the Portfolio page can warn."""
+        import contextvars
+        import threading
+
+        def scan() -> None:
+            from finance.ledger import Ledger
+            try:
+                led = Ledger(db_path)
+                try:
+                    led.flag_duplicate_accounts()
+                    led.flag_duplicate_transactions()
+                finally:
+                    led.close()
+            except Exception:                                     # a failed scan must never get in anyone's way
+                pass
+
+        ctx = contextvars.copy_context()
+        ctx.run(vault.current_vault.set, v)
+        threading.Thread(target=ctx.run, args=(scan,), daemon=True).start()
+
+    accounts.register(app, SimpleNamespace(users=users, registry=registry, throttle=throttle, templates=templates,
+                                           challenges=challenges, render=render, after_unlock=after_unlock))
 
     # ── overview (the landing page) and the mutual fund portfolio ────────────────
 
@@ -278,11 +262,11 @@ def create_app(token: str, db_path: str = DB_PATH, jobs: JobManager | None = Non
             parser = "bank"
         cfg = load_config(mail_config_path)
         templates = list(dict.fromkeys(t for a in cfg.accounts for r in a.senders for t in r.templates))
-        typed = [x for x in (password, CAS_PASSWORD) if x]
+        typed = [x for x in (password,) if x]
 
         def import_one(upload: UploadFile) -> dict:
             """One file: unlock it the way mailbox sync does (a typed password first, then the Identity templates from
-            your sender rules and your CAS password), then import it. Passwords stay in memory; nothing is stored or echoed."""
+            your sender rules and your default password), then import it. Passwords stay in memory; nothing is stored or echoed."""
             out = {"name": upload.filename or "statement.pdf", "result": None, "used": None, "error": None}
             data = upload.file.read(50 * 1024 * 1024 + 1)
             if len(data) > 50 * 1024 * 1024 or not data.startswith(b"%PDF"):
@@ -295,7 +279,7 @@ def create_app(token: str, db_path: str = DB_PATH, jobs: JobManager | None = Non
             if unlocked is not None and not unlocked.ok:
                 out["error"] = unlocked.reason + " Type the PDF password above."
                 return out
-            pw = unlocked.password.get_secret_value() if unlocked and unlocked.password else (password or CAS_PASSWORD or None)
+            pw = unlocked.password.get_secret_value() if unlocked and unlocked.password else (password or None)
             fd, tmp = tempfile.mkstemp(suffix=".pdf")
             try:
                 with os.fdopen(fd, "wb") as f:
@@ -369,7 +353,7 @@ def create_app(token: str, db_path: str = DB_PATH, jobs: JobManager | None = Non
             return PlainTextResponse("no such job", status_code=404)
         return templates.TemplateResponse(request, "_joblog.html", {"job": meta, "log": jobs.log(job_id)})
 
-    # ── mailboxes & identity (secrets are write-only: stored in the keyring, never shown) ──
+    # ── mailboxes & identity (secrets are write-only: sealed in your own vault, never shown) ──
 
     from finance import secrets as secret_store
     from finance.mailconfig import (MailboxAccount, default_cas_rules, format_sender_lines, load_config,
@@ -419,7 +403,7 @@ def create_app(token: str, db_path: str = DB_PATH, jobs: JobManager | None = Non
             if app_password:
                 secret_store.set_secret(acct.secret_key, app_password.strip())
             elif not secret_store.has_secret(acct.secret_key):
-                raise ValueError("enter the app password (it is stored in your OS keyring, never in a file)")
+                raise ValueError("enter the app password (it is sealed in your own vault, never shown again)")
             save_config(cfg, mail_config_path)
         except ValueError as exc:
             return render(request, "mailboxes.html", **mailboxes_ctx(request, error=str(exc), form=form))
@@ -484,7 +468,6 @@ def create_app(token: str, db_path: str = DB_PATH, jobs: JobManager | None = Non
         ident = Identity()
         return dict(page="identity", flash=flash, error=error,
                     extra_count=len(ident.extra_passwords()),
-                    activity=auth_mod.recent_events() if login_mode else [],
                     fields=[(k, v, secret_store.has_secret(f"id:{k}")) for k, v in IDENTITY_LABELS.items()])
 
     @app.get("/identity", response_class=HTMLResponse)
@@ -548,7 +531,7 @@ def create_app(token: str, db_path: str = DB_PATH, jobs: JobManager | None = Non
             return PlainTextResponse("no such open item", status_code=404)
         ledger = Ledger(db_path)
         try:
-            backup = ledger.backup(BACKUP_DIR)
+            backup = ledger.backup()
             n = ledger.remove_duplicate_transactions()
         finally:
             ledger.close()
@@ -559,7 +542,7 @@ def create_app(token: str, db_path: str = DB_PATH, jobs: JobManager | None = Non
         from finance.ledger import Ledger
         ledger = Ledger(db_path)
         try:
-            backup = ledger.backup(BACKUP_DIR)
+            backup = ledger.backup()
             res = ledger.merge_all_duplicates()
         finally:
             ledger.close()
@@ -584,7 +567,7 @@ def create_app(token: str, db_path: str = DB_PATH, jobs: JobManager | None = Non
                 note = "Kept as separate folios."
             else:
                 _, pa, pb = row["ref"].split(":")
-                backup = ledger.backup(BACKUP_DIR)                     # always snapshot before changing data
+                backup = ledger.backup()                     # always snapshot before changing data
                 res = ledger.merge_accounts(int(pa), int(pb))
                 note = (f"Merged: {res['moved']} transaction(s) moved, {res['dropped']} duplicate(s) dropped. "
                         f"Backup saved as {Path(backup).name} in data/backups.")
@@ -623,7 +606,7 @@ def create_app(token: str, db_path: str = DB_PATH, jobs: JobManager | None = Non
                 if ok and remember:
                     runner.remember_password(pw)
             if pw and remember and note.split(" ")[0] in ("imported", "duplicate"):
-                note += " · password remembered in your keyring."
+                note += " · password remembered in your vault."
         conn = connect_ro(db_path)
         try:
             items = analytics.review_items_detailed(conn)

@@ -5,6 +5,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+from finance import vault
+
 SCHEMA_VERSION = 7
 
 SCHEMA = """
@@ -197,19 +199,33 @@ def _migrate(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _prepare(conn: sqlite3.Connection) -> None:
+    """Create or upgrade the schema on a read-write connection."""
+    fresh_version = conn.execute("PRAGMA user_version").fetchone()[0]
+    conn.executescript(SCHEMA)               # CREATE IF NOT EXISTS: v1 tables
+    if fresh_version == 0:
+        conn.execute("PRAGMA user_version = 1")
+    _migrate(conn)
+
+
 def connect_rw(path: str | Path) -> sqlite3.Connection:
-    """Read-write connection. Intended for finance.ledger only."""
+    """Read-write connection. Intended for finance.ledger only. The path `vault:db` means the signed-in profile's
+    encrypted ledger; anything else is a plain SQLite file (tests, tools)."""
+    if str(path) == vault.VAULT_DB:
+        conn = vault.require_vault().connect(writable=True)
+        try:
+            _prepare(conn)
+        except BaseException:
+            conn.close()
+            raise
+        return conn
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(p)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
-    fresh_version = conn.execute("PRAGMA user_version").fetchone()[0]
-    conn.executescript(SCHEMA)               # CREATE IF NOT EXISTS: v1 tables
-    if fresh_version == 0:
-        conn.execute("PRAGMA user_version = 1")
-    _migrate(conn)
+    _prepare(conn)
     return conn
 
 
@@ -219,6 +235,18 @@ def connect_ro(path: str | Path) -> sqlite3.Connection:
     A missing or older database is created/upgraded first (schema only, no data is touched),
     so a page never queries a table that a newer release added.
     """
+    if str(path) == vault.VAULT_DB:
+        v = vault.require_vault()
+        probe = v.connect(writable=False)
+        try:
+            needs_upgrade = probe.execute("PRAGMA user_version").fetchone()[0] < SCHEMA_VERSION
+        finally:
+            probe.close()
+        if needs_upgrade:
+            connect_rw(path).close()
+        conn = v.connect(writable=False)
+        conn.execute("PRAGMA query_only = ON")
+        return conn
     p = Path(path)
     if p.exists():
         probe = sqlite3.connect(f"file:{p}?mode=ro", uri=True)

@@ -56,33 +56,50 @@ def stmt():
     return CasParser().from_casdata(make_cas())
 
 
-@pytest.fixture
-def db_path(tmp_path):
-    return str(tmp_path / "t.db")
-
-
-import keyring
-from keyring.backend import KeyringBackend
-
-
-class MemKeyring(KeyringBackend):
-    priority = 1
-
-    def __init__(self): self.d = {}
-    def get_password(self, s, k): return self.d.get((s, k))
-    def set_password(self, s, k, v): self.d[(s, k)] = v
-    def delete_password(self, s, k): self.d.pop((s, k), None)
+PASSWORD = "correct horse battery"
 
 
 @pytest.fixture(autouse=True)
-def isolated_keyring(monkeypatch, tmp_path):
-    """No test may read or write the real OS keyring, env secrets, or data/ directories."""
-    keyring.set_keyring(MemKeyring())
-    for k in ("CAS_PASSWORD",):
+def private_data(tmp_path, monkeypatch):
+    """Nothing a test does may touch the real data/ folder: profiles, vaults and logs live under tmp_path, and the key
+    derivation is made cheap (the stored record carries its own parameters, so production settings are untouched)."""
+    from finance import vault
+    monkeypatch.setattr(vault, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(vault, "USERS_DIR", tmp_path / "data" / "users")
+    monkeypatch.setattr(vault, "KDF", {"n": 2**4, "r": 1, "p": 1})
+    monkeypatch.setenv("LEDGER_HASH_KEY", "test-hash-key")
+    for k in ("KOSH_ALLOWED_HOSTS", "KOSH_TRUST_PROXY"):
         monkeypatch.delenv(k, raising=False)
-    import finance.sync as sync_mod
-    monkeypatch.setattr(sync_mod, "INBOX_DIR", str(tmp_path / "inbox"))
-    yield
+
+
+@pytest.fixture
+def users(private_data):
+    from finance.users import Users
+    return Users()
+
+
+@pytest.fixture
+def registry(private_data):
+    from finance.vault import Registry
+    return Registry()
+
+
+@pytest.fixture(autouse=True)
+def me(users, registry):
+    """A signed-in, unlocked profile for every test: 'the database' and 'the secrets' are its vault, exactly as in the app.
+    Yields the profile record; `me["vault"]` is not stored: use vault.current_vault.get()."""
+    from finance import vault
+    user, dek, _recovery = users.sign_up("Test Person", PASSWORD, users.new_setup_code())
+    token = vault.current_vault.set(registry.unlock(user["id"], dek))
+    yield user
+    vault.current_vault.reset(token)
+
+
+@pytest.fixture
+def db_path(me):
+    """The signed-in profile's encrypted ledger."""
+    from finance import vault
+    return vault.VAULT_DB
 
 
 def make_summary(*, as_of="2025-03-31", folios=None):

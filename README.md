@@ -26,43 +26,34 @@ python -m venv venv && source venv/bin/activate
 python -m pip install -r requirements.txt          # use `python -m pip`, not bare `pip`
 cp .env.example .env                               # optional: everything in it has a default
 
-python main.py ui                                  # opens http://127.0.0.1:8765/?token=...
+python main.py ui                                  # prints a one-time setup code and opens the browser
 ```
+
+Then everything happens in the browser: enter the setup code, choose your name and a password, and **save the recovery key** you
+are shown. The first profile is the admin; family members join later with invite codes you create on the **People** page. Each
+person's data is encrypted for them alone, so not even the admin can read it.
 
 ### With Docker (about two minutes)
 
 ```bash
 docker run -d --name kosh -p 127.0.0.1:8765:8765 -v kosh-data:/app/data ghcr.io/phaninderg/kosh:latest
-docker logs kosh          # prints the link to open, with its access token
+docker logs kosh          # prints the setup code; open http://localhost:8765/signup and create your profile
 ```
 
-Or `docker compose up -d` from a clone (set `KOSH_PORT=9000` first if 8765 is taken, and change both sides of `-p` the same way plus `-e KOSH_PUBLIC_PORT=9000` if you use `docker run`). Your ledger, mailbox settings and secrets live in the `kosh-data` volume, so they survive upgrades (`docker pull`, then recreate the container). Things to know:
+Or `docker compose up -d` from a clone (set `KOSH_PORT=9000` first if 8765 is taken, and change both sides of `-p` the same way plus `-e KOSH_PUBLIC_PORT=9000` if you use `docker run`). Everything lives in the `kosh-data` volume, so it survives upgrades (`docker pull`, then recreate the container). Things to know:
 
-- Publish the port on `127.0.0.1` only, as above. The UI has no login beyond the per-launch token and must never face a network.
-- A container has no OS keyring, so secrets (mailbox app passwords, Identity details) are kept in `/app/data/secrets.json`, readable only by the app's user, in plain text. Anyone who can read the volume can read them. Prefer the keyring install above if the machine is shared.
+- Publish the port on `127.0.0.1` only, as above, unless you follow [docs/HOSTING.md](docs/HOSTING.md) (HTTPS, a real domain or Tailscale).
+- Your data is encrypted with a key that only your password and recovery key can open. Back up the whole volume; the archive is encrypted too.
+- After a restart, or 8 idle hours, you enter your password once to unlock your data again.
 - To try it without your own statements, upload the dummy PDFs from `samples/` in this repo (Import page; passwords are listed in `samples/manifest.json`).
 - Build it yourself with `docker build -t kosh .`
 
-### What it can read today
-
-Kosh only understands the PDF formats below. Anything else is refused with a message rather than guessed at.
-
-| Kind | Supported | Not supported yet |
-|---|---|---|
-| **Bank** | ICICI Bank savings account statements: the monthly emailed one and the "Statement of Transactions" you request for any period. Fixed deposits and PPF held with ICICI, listed in the same statement | Recurring deposits (skipped with a warning), other ICICI products, every other bank |
-| **Credit cards** | ICICI, HDFC, Axis and Tata Neu card statements | Every other issuer; EMI conversions are not broken out |
-| **Mutual funds** | Detailed consolidated account statements (CAS) from CAMS, KFintech and MF Central | NSDL / CDSL demat statements, stocks |
-| **NPS** | Transaction statements (monthly, annual, and the ones downloaded from the NPS portal), Tier I | Tier II (the parser has a synthetic test for it but it has never seen a real Tier II statement), Atal Pension Yojana |
-| **Other assets** | | EPF, PPF at other banks or the Post Office, loans, insurance, gold, real estate |
-
-The [ROADMAP](ROADMAP.md) lists what is pending, so you can see whether yours is on it or add it. Dummy PDFs for every supported layout are in `samples/`.
-
 First run in the UI:
-1. **Identity**: add your name, date of birth and other personal details (they build PDF passwords in memory and are kept in the OS keyring).
+1. **Identity**: add your name, date of birth and other personal details (they build PDF passwords in memory and are kept sealed in your own vault).
 2. **Import**: upload a *detailed* CAS PDF (CAMS / KFintech / MF Central), or set up **Mailboxes** and press **Sync now**.
 3. **Overview** shows your net worth; **Mutual funds** has holdings, invested, value, XIRR. If the red "not reliable" banner appears, open **Review**.
 
-**On your phone:** Kosh is an installable web app (PWA). Run it on a small server with a password and HTTPS, then Add to Home Screen. Steps, with a Tailscale option that keeps it off the public internet, are in [docs/HOSTING.md](docs/HOSTING.md); what is and is not protected is in [SECURITY.md](SECURITY.md).
+**On your phone:** Kosh is an installable web app (PWA). Run it on a small server with HTTPS, create your profile, then Add to Home Screen and add a passkey (Face ID / fingerprint). Steps, with a Tailscale option that keeps it off the public internet, are in [docs/HOSTING.md](docs/HOSTING.md); what is and is not protected is in [SECURITY.md](SECURITY.md).
 
 Restart `python main.py ui` after pulling code changes: templates reload by themselves, Python code does not.
 
@@ -70,10 +61,10 @@ Restart `python main.py ui` after pulling code changes: templates reload by them
 
 ```bash
 python -m pip install -r requirements-dev.txt
-python -m pytest                      # 388 tests; no network, no real data, no real keyring or mailbox
+python -m pytest                      # no network, no real data, no real mailbox
 ```
 
-- Tests use synthetic fixtures only and an in-memory keyring (an autouse fixture prevents any test from touching your Keychain or `data/`).
+- Tests use synthetic fixtures only; an autouse fixture gives every test a temporary data folder and its own signed-in profile with an encrypted vault, so nothing can touch a real `data/`.
 - Mutation-style checks guard the important guarantees (read-only IMAP, allowlist, summary matching, history completeness).
 - Never commit real statements or real personal data. Parser tests build synthetic PDFs in code (`tests/pdffix.py`, `tests/cardfix.py`, `tests/npsfix.py`), and `samples/` holds a dummy PDF for every supported layout.
 

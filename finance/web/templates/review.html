@@ -33,7 +33,7 @@
  <p class="mute">Statements requested with a custom password can't be guessed from a pattern. Type it below (used once, in memory), or fix Identity / templates and retry.</p>
  <form method="post" action="/review/{{ i.id }}/attention/retry" autocomplete="off">
   <label>PDF password (optional)</label><input type="password" name="password" autocomplete="new-password">
-  <label style="display:inline"><input type="checkbox" name="remember" value="1" style="width:auto"> Remember it in my keyring if it works</label><br>
+  <label style="display:inline"><input type="checkbox" name="remember" value="1" style="width:auto"> Remember it in my vault if it works</label><br>
   <label style="display:inline"><input type="checkbox" name="apply_all" value="1" style="width:auto"> Also try it on the other waiting statements</label>
   <p><button>Retry</button></p></form>
  <form method="post" action="/review/{{ i.id }}/attention/dismiss"><button class="sec">Dismiss</button></form>

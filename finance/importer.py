@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from config import DB_PATH
+from finance import vault
 from finance.hashing import file_sha256
 from finance.ledger import Ledger
 from finance.models import ImportResult
@@ -61,7 +61,7 @@ class _AutoFailed(Exception):
 
 
 def import_any(path: str | Path, parser_name: str = "auto", password: str | None = None,
-               db_path: str = DB_PATH, original_name: str | None = None) -> tuple[ImportResult, str]:
+               db_path: str = vault.VAULT_DB, original_name: str | None = None) -> tuple[ImportResult, str]:
     """Import one statement file; returns (result, the parser that read it). Raises the parser's error if refused."""
     from finance.passwords import Identity
     from finance.redact import make_redactor, redact
@@ -84,8 +84,3 @@ def import_any(path: str | Path, parser_name: str = "auto", password: str | None
             redactor=make_redactor(ident.get("name"), ident.get("pan"), ident.get("mobile"))), used
     finally:
         ledger.close()
-
-
-def import_file(path: str | Path, parser_name: str = "cas", password: str | None = None,
-                db_path: str = DB_PATH, original_name: str | None = None) -> ImportResult:
-    return import_any(path, parser_name, password, db_path, original_name)[0]

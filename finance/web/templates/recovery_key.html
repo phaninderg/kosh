@@ -1,0 +1,13 @@
+{% extends "auth_base.html" %}{% block title %}Recovery key{% endblock %}{% block body %}
+<div class="card">
+ <h2 style="margin-top:0">{{ heading }}</h2>
+ <p>Save this recovery key somewhere safe (a password manager, or on paper in a drawer). If you forget your password, it is the <b>only</b> way to get your data back. It is shown once and the server does not keep it.</p>
+ <p class="recovery" id="rk">{{ recovery }}</p>
+ <p><button type="button" class="sec" onclick="navigator.clipboard&&navigator.clipboard.writeText(document.getElementById('rk').textContent.trim())">Copy</button></p>
+ <label style="display:flex;gap:8px;align-items:center;color:inherit;font-size:14px"><input type="checkbox" id="saved" style="width:auto"> I have saved my recovery key</label>
+ <p><a class="btn" id="go" href="/" style="width:100%;text-align:center;opacity:.4;pointer-events:none">Continue</a></p>
+ <p class="mute small">Optional: use Face ID or your fingerprint to sign in on this device next time.</p>
+ <button class="sec" type="button" style="width:100%" data-passkey="add" hidden>Add a passkey on this device</button>
+ <p class="mute small" id="pk-msg" role="status"></p>
+</div>
+<script>document.getElementById('saved').addEventListener('change',e=>{const g=document.getElementById('go');g.style.opacity=e.target.checked?1:.4;g.style.pointerEvents=e.target.checked?'auto':'none'})</script>{% endblock %}

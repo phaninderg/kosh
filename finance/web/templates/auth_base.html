@@ -1,0 +1,9 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#2457d6"><link rel="manifest" href="/manifest.webmanifest"><link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
+<title>{% block title %}Sign in{% endblock %} · Kosh</title><link rel="stylesheet" href="/static/style.css"></head><body class="login">
+<main class="login-box">
+ <h1><img src="/static/icons/icon-192.png" alt="" width="40" height="40"> Kosh</h1>
+ {% if error %}<div class="flash err" role="alert">{{ error }}</div>{% endif %}{% if notice %}<div class="flash ok">{{ notice }}</div>{% endif %}
+ {% block body %}{% endblock %}
+</main><script src="/static/passkey.js"></script>
+<script>if('serviceWorker' in navigator&&(location.protocol==='https:'||location.hostname==='localhost'))navigator.serviceWorker.register('/sw.js').catch(()=>{})</script></body></html>

@@ -16,6 +16,10 @@ _KEY_FILE = Path(__file__).resolve().parent.parent / "data" / ".hash_key"
 
 
 def _key() -> bytes:
+    from finance import vault
+    v = vault.current_vault.get()
+    if v:
+        return v.hash_key()                    # each profile hashes with its own key, derived from its data key
     env = os.getenv("LEDGER_HASH_KEY")
     if env:
         return env.encode()

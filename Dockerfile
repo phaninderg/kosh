@@ -1,7 +1,7 @@
 FROM python:3.13-slim
 
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PIP_NO_CACHE_DIR=1 \
-    KOSH_HOST=0.0.0.0 KOSH_NO_BROWSER=1 KOSH_SECRET_STORE=file
+    KOSH_HOST=0.0.0.0 KOSH_NO_BROWSER=1
 
 WORKDIR /app
 COPY requirements.txt .
@@ -10,7 +10,7 @@ RUN pip install -r requirements.txt
 COPY config.py main.py ./
 COPY finance ./finance
 
-# Your ledger, mailbox settings and secrets live in /app/data: mount a volume there so they outlive the container.
+# Every profile's encrypted data and the sign-in records live in /app/data: mount a volume there so they outlive the container.
 RUN useradd --create-home --uid 10001 kosh && mkdir -p /app/data && chown kosh /app/data
 USER kosh
 VOLUME /app/data

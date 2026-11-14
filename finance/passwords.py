@@ -1,6 +1,6 @@
 """Decrypt Agent: unlock password-protected statement PDFs.
 
-Passwords are *templates* over identity values held in the keyring/env, e.g. {name4}{ddmm}.
+Passwords are *templates* over identity values held in the signed-in profile's vault, e.g. {name4}{ddmm}.
 Candidates are tried in order (cached working template for the sender, the sender's own
 templates, then the defaults). The resolved password exists only in memory.
 """
@@ -40,7 +40,7 @@ def validate_template(template: str) -> str:
 
 
 class Identity:
-    """Reads identity values lazily from the keyring/env."""
+    """Reads identity values lazily from the profile's vault."""
 
     def __init__(self, values: dict[str, str] | None = None):
         self._values = values
@@ -76,7 +76,7 @@ class Identity:
         return [d for d in re.split(r"[\s,]+", self.get("card4") or "") if re.fullmatch(r"\d{4}", d)]
 
     def remember_card4(self, digits: str) -> None:
-        """Keep a card ending found by search so the next statement unlocks at once (keyring/env only)."""
+        """Keep a card ending found by search so the next statement unlocks at once (vault only)."""
         if self._values is not None or digits in self.card4_values():
             return
         secrets.set_secret("id:card4", ",".join(self.card4_values() + [digits]))

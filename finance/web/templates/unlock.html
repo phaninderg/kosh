@@ -1,0 +1,8 @@
+{% extends "auth_base.html" %}{% block title %}Unlock{% endblock %}{% block body %}
+<form method="post" action="/unlock" class="card">
+ <input type="hidden" name="next" value="{{ next }}">
+ <p>Hello, <b>{{ me.name }}</b>. Your data is locked (the server restarted, or it was idle). Enter your password to open it. A passkey signs you in, but only your password can unlock your data.</p>
+ <label for="pw">Password</label><input id="pw" name="password" type="password" autocomplete="current-password" required autofocus>
+ <p><button style="width:100%">Unlock</button></p>
+</form>
+<form method="post" action="/logout" class="card"><button class="sec" style="width:100%">Sign out</button></form>{% endblock %}

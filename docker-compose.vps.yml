@@ -1,13 +1,13 @@
 # Kosh on your own server, reachable from your phone over HTTPS. See docs/HOSTING.md.
 #   1. point a DNS name at the server, then:  echo "KOSH_DOMAIN=kosh.example.com" > .env
 #   2. docker compose -f docker-compose.vps.yml up -d
-#   3. docker compose -f docker-compose.vps.yml exec kosh python main.py set-password
+#   3. docker compose -f docker-compose.vps.yml logs kosh      # prints the one-time setup code
+#   4. open https://<your domain>/signup in a browser and create the first profile (you become the admin)
 services:
   kosh:
     image: ghcr.io/phaninderg/kosh:latest
     restart: unless-stopped
     environment:
-      KOSH_AUTH: login
       KOSH_ALLOWED_HOSTS: ${KOSH_DOMAIN:?set KOSH_DOMAIN in .env, e.g. kosh.example.com}
       KOSH_TRUST_PROXY: "1"                 # only Caddy, on the private compose network, can reach the app
     volumes:

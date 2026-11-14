@@ -1,4 +1,4 @@
-"""Mailbox configuration (non-secret) in data/mailboxes.json. App passwords live in the keyring."""
+"""Mailbox configuration, sealed in the signed-in profile's vault. App passwords are kept apart, in the same vault."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-from config import MAIL_CONFIG_PATH
+from finance import vault
 
 PROVIDERS = {"gmail": "imap.gmail.com", "yahoo": "imap.mail.yahoo.com"}
 CAS_SENDERS = ("camsonline.com", "kfintech.com", "mfcentral.com")
@@ -101,14 +101,22 @@ def default_cas_rules() -> list[SenderRule]:
     return [SenderRule(match=d, parser="cas") for d in CAS_SENDERS]
 
 
-def load_config(path: str = MAIL_CONFIG_PATH) -> MailConfig:
+VAULT_NAME = "mailboxes.json"
+
+
+def load_config(path: str = vault.VAULT_FILES) -> MailConfig:
+    """The signed-in profile's mailbox settings (sealed in its vault), or a plain JSON file for tests."""
     try:
-        return MailConfig.model_validate(json.loads(Path(path).read_text()))
+        raw = vault.require_vault().get(VAULT_NAME) if path == vault.VAULT_FILES else Path(path).read_bytes()
+        return MailConfig.model_validate(json.loads(raw)) if raw else MailConfig()
     except (OSError, ValueError):
         return MailConfig()
 
 
-def save_config(cfg: MailConfig, path: str = MAIL_CONFIG_PATH) -> None:
+def save_config(cfg: MailConfig, path: str = vault.VAULT_FILES) -> None:
+    if path == vault.VAULT_FILES:
+        vault.require_vault().put(VAULT_NAME, cfg.model_dump_json(indent=2).encode())
+        return
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(".tmp")

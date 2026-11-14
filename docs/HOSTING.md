@@ -1,51 +1,60 @@
 # Hosting Kosh on a server and using it from your phone
 
-Kosh is an installable web app (PWA). Run it on a small VPS, open it on your phone, tap **Add to Home Screen**, and it
-behaves like an app: its own icon, full screen, no browser bar.
+Kosh is an installable web app (PWA). Run it on a small VPS, open it on your phone, tap **Add to Home Screen**, and it behaves
+like an app: its own icon, full screen, no browser bar. Everything, from creating the first profile to importing statements,
+is done in the browser. There is no command-line password step.
 
-**Read this first.** Kosh holds your balances, transactions and (if you use mailbox sync) a mail app password. Putting it
-on a server means putting that on a machine on the internet. Choose the safest access you can live with:
+**Read this first.** Kosh holds your balances and transactions and, if you use mailbox sync, a mail app password. Putting it on a
+server means putting that on a machine on the internet. Choose the safest access you can live with:
 
 | Way in | Exposure | Use it when |
 |---|---|---|
 | **Tailscale** (recommended) | None. The server has no public web port; only your own devices can reach it | You can install Tailscale on your phone. This is the safest option |
-| **Public HTTPS + login** | The login page is on the internet, protected by a password and an authenticator code | You need to open it from any browser |
-
-The full list of protections and limits is in [SECURITY.md](../SECURITY.md). In both cases the app asks for a password. Do not run it without one anywhere except `127.0.0.1`.
+| **Public HTTPS** | The sign-in page is on the internet, protected by passwords, passkeys, throttling and invite-only sign-up | You need to open it from any browser |
 
 ## What protects you
 
-- Sign-in with a password (stored only as a salted scrypt hash) and, by default, a 6-digit code from an authenticator app.
-- Five wrong guesses lock that address out, with the lock growing to an hour; a global cap stops guessing from many addresses.
-- Sessions are signed, last 30 days, and stop working when you change the password or press **Sign out everywhere**.
-- The Identity page lists recent sign-ins and failures (and `data/audit.log` keeps them), so you can spot guessing.
-- The cookie is HttpOnly, SameSite=Strict and, on HTTPS, Secure with the `__Host-` prefix (a sibling subdomain cannot shadow it); every response carries `no-store`, a Content-Security-Policy and
-  anti-framing headers; forms must come from the same site; the app only answers to your domain.
-- The installed app caches only its stylesheet, scripts and icons. **Pages and figures are never stored on the phone**:
-  offline you see a notice, not old balances.
+- **Each person's data is encrypted for that person alone.** Every profile has its own random key. The ledger, saved secrets,
+  mailbox settings, uploaded statements, job logs and backups are all sealed (AES-256-GCM) under it. The key is stored only
+  *wrapped* by the person's password and by a one-time recovery key, so **no one else can read it: not another profile, not the
+  admin, and not someone who copies the server's disk or a backup.**
+- **Invite-only.** The first person to set up becomes the admin, and needs a setup code that the server prints once at start-up.
+  Everyone after that needs a one-time invite code from the admin. The admin can invite, disable and remove people, but has no
+  key to anyone's data.
+- **Sign in with a passkey** (Face ID, fingerprint, a security key) or a password. A passkey signs you in; your password also
+  unlocks your data. After a server restart (or 8 idle hours) you enter your password once to unlock it.
+- **A forgotten password is recoverable** with the recovery key you saved at sign-up. Lose both and the data is gone for good
+  (that is what "encrypted for you alone" means).
+- Five wrong guesses lock an address out for a growing time; sessions last 30 days and end when you change your password, press
+  **Sign out everywhere**, or are disabled. Cookies are HttpOnly, SameSite=Strict, and on HTTPS Secure with the `__Host-` prefix.
+  Every page is `no-store`; the installed app caches only its stylesheet, scripts and icons, never your figures.
+- The Account page lists your recent sign-ins and failures (and the admin sees everyone's, never anyone's money).
+
+The full list of protections and limits is in [SECURITY.md](../SECURITY.md).
 
 ## What does not protect you (be honest with yourself)
 
-- **The data on the server is not encrypted by Kosh.** The ledger (`finance.db`) and the saved secrets (`secrets.json`: mailbox
-  app passwords, your Identity details) are plain files in the Docker volume, readable by whoever controls the server.
-  Use a provider you trust, turn on disk encryption if it is offered, keep the OS patched, and allow only SSH keys.
-- Anyone who gets your password **and** your phone's authenticator can sign in. Use a long random password.
-- A mailbox app password on a server is a credential an attacker could use to read that mailbox. Use a dedicated mailbox or
-  Gmail app password you can revoke, or upload statements by hand and skip mailbox sync.
+- While you are unlocked, your key is in the server's memory. Someone with root on the server **can** read it then. Encryption
+  protects data at rest, backups and other profiles, not a compromised running server. Use a host you trust, keep it patched,
+  allow only SSH keys, and prefer a short idle timeout (`KOSH_IDLE_LOCK_HOURS`).
+- A mailbox app password inside a profile is a credential an attacker with your unlocked profile could use. Use a revocable
+  one, or skip mailbox sync and upload statements by hand.
+- A statement is briefly written as a temporary file while it is read. Use a server whose `/tmp` is memory-backed (the Docker
+  image does not guarantee it) if that matters to you.
 
 ## Option A: Tailscale (no public exposure)
 
 ```bash
 # on the server, with Docker and Tailscale installed and `tailscale up` done
 docker run -d --name kosh --restart unless-stopped \
-  -e KOSH_AUTH=login -e KOSH_TRUST_PROXY=1 -e KOSH_ALLOWED_HOSTS=myserver.tailnet-name.ts.net \
+  -e KOSH_TRUST_PROXY=1 -e KOSH_ALLOWED_HOSTS=myserver.tailnet-name.ts.net \
   -p 127.0.0.1:8765:8765 -v kosh-data:/app/data ghcr.io/phaninderg/kosh:latest
-docker exec -it kosh python main.py set-password        # add the printed key to your authenticator app
-tailscale serve --bg --https=443 http://127.0.0.1:8765  # HTTPS on your tailnet, with a real certificate
+docker logs kosh                                          # shows the one-time setup code
+tailscale serve --bg --https=443 http://127.0.0.1:8765   # HTTPS on your tailnet, with a real certificate
 ```
 
-Open `https://myserver.tailnet-name.ts.net` on your phone (with Tailscale on) and sign in. `KOSH_ALLOWED_HOSTS` must be
-the exact name `tailscale serve` shows you.
+Open `https://myserver.tailnet-name.ts.net/signup` on your phone (with Tailscale on), enter the setup code, and create your
+profile. `KOSH_ALLOWED_HOSTS` must be the exact name `tailscale serve` shows you.
 
 ## Option B: public HTTPS with Caddy
 
@@ -57,12 +66,20 @@ the exact name `tailscale serve` shows you.
    git clone https://github.com/phaninderg/kosh.git && cd kosh
    echo "KOSH_DOMAIN=kosh.example.com" > .env
    docker compose -f docker-compose.vps.yml up -d
-   docker compose -f docker-compose.vps.yml exec kosh python main.py set-password
+   docker compose -f docker-compose.vps.yml logs kosh      # the one-time setup code
    ```
 
-   `set-password` asks for a password (12+ characters) and prints an authenticator key once. Add it to your authenticator app.
-   Pass `--no-totp` only if the server is reachable solely through a private network.
-4. Caddy gets a Let's Encrypt certificate by itself. Open `https://kosh.example.com`, sign in, and check the padlock.
+4. Open `https://kosh.example.com/signup`, enter the setup code, choose a name and a password (12+ characters), and **save the
+   recovery key** shown next. Caddy gets a Let's Encrypt certificate by itself. Check the padlock.
+
+The server answers only to the domain you set, over HTTPS.
+
+## Family members
+
+The admin opens **People**, creates an **invite code** (one use, valid for 7 days) and gives it to the person. They open
+`/signup` on the same address, enter the code, and create their own profile with their own password and recovery key. Each person
+sees only their own data. The admin can disable or remove a profile (removal deletes its encrypted data for good) but cannot
+read it or reset its password.
 
 ## Put it on your phone
 
@@ -70,13 +87,14 @@ the exact name `tailscale serve` shows you.
 - **Android (Chrome):** menu, **Install app** (or **Add to Home screen**).
 
 It needs HTTPS, which both options above provide; an installed app will not work over plain `http://`.
+Then add a passkey: **Account → Add a passkey on this device** (needs a sign-in from the last ten minutes), or make a code on
+your laptop (**Account → Make a code…**) and enter it on the phone's sign-in page.
 
 ## Day-to-day
 
-- **Upgrade:** `docker compose -f docker-compose.vps.yml pull && docker compose -f docker-compose.vps.yml up -d`. Your data stays in the volume.
-- **Back up** (do it before upgrades and on a schedule):
+- **Upgrade:** `docker compose -f docker-compose.vps.yml pull && docker compose -f docker-compose.vps.yml up -d`. Data stays in the volume.
+- **Back up** the whole volume (it is already encrypted, so the archive is as private as the server):
   `docker run --rm -v kosh-data:/d -v "$PWD":/b alpine tar czf /b/kosh-$(date +%F).tgz -C /d .`
-  The archive contains everything above, secrets included: store it as carefully as the server itself.
-- **Lost phone?** Sign in elsewhere and press **Sign out everywhere** on the Identity page, or run `set-password` again.
-- **Locked out?** `docker compose -f docker-compose.vps.yml exec kosh python main.py set-password` resets the password and the authenticator.
+- **Lost phone?** Sign in elsewhere and use **Account → Sign out everywhere**, then remove its passkey.
+- **Forgot your password?** Use **Forgot your password?** on the sign-in page with your recovery key.
 - **Logs:** `docker compose -f docker-compose.vps.yml logs -f kosh`. The app does not log passwords, codes or statement contents.

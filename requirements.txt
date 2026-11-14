@@ -1,10 +1,12 @@
 casparser==1.4.1
+cbor2==6.3.0
+cryptography==50.0.2
 fastapi==0.162.5
 Jinja2==3.1.6
-keyring==25.7.0
 pdfminer.six==20260107
 pdfplumber==0.11.10
 pydantic==2.14.3
 python-dotenv==1.2.4
 python-multipart==0.0.33
 uvicorn==0.54.0
+webauthn==3.0.1

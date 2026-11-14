@@ -1,7 +1,7 @@
 {% extends "base.html" %}{% block body %}
 <h1>Mailboxes</h1>
 {% if flash %}<div class="flash ok">{{ flash }}</div>{% endif %}{% if error %}<div class="flash err">{{ error }}</div>{% endif %}
-<p class="mute">Read-only IMAP: the app opens the folder in examine mode, never marks mail as read, and never moves or deletes anything. Only mail from the senders you list is downloaded. Use an <b>app password</b> (Gmail: Google Account → Security → App passwords; Yahoo: Account security → Generate app password). It goes to your OS keyring.</p>
+<p class="mute">Read-only IMAP: the app opens the folder in examine mode, never marks mail as read, and never moves or deletes anything. Only mail from the senders you list is downloaded. Use an <b>app password</b> (Gmail: Google Account → Security → App passwords; Yahoo: Account security → Generate app password). It is sealed in your own vault.</p>
 {% for x in accounts %}
 <div class="card"><b>{{ x.a.name }}</b> <span class="mute">· {{ x.a.provider }} · {{ x.a.username }} · folder {{ x.a.folder }}</span>
  <p class="mute">App password: {{ '✓ stored' if x.password_set else '✗ not set' }} · Last sync: {% if x.last_sync %}{{ x.last_sync|ts }}{% else %}never{% endif %} · Senders: {{ x.a.senders|map(attribute='match')|join(', ') }}</p>

@@ -672,7 +672,11 @@ class Ledger:
                 out.append(msg)
         return out
 
-    def backup(self, directory: str) -> str:
+    def backup(self, directory: str | None = None) -> str:
+        """A copy of the ledger before a destructive change. A vaulted ledger is copied sealed, so a backup is as private as the
+        ledger; `directory` applies only to plain files."""
+        if hasattr(self.conn, "_vault"):
+            return str(self.conn._vault.snapshot())
         Path(directory).mkdir(parents=True, exist_ok=True)
         dest = str(Path(directory) / f"finance-{time.strftime('%Y%m%d-%H%M%S')}.db")
         self.conn.execute("VACUUM INTO ?", (dest,))

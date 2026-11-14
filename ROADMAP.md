@@ -11,7 +11,7 @@ Status: MVP (branch `main`). The test suite is green and uses synthetic data onl
 One local place to see what you own: bank balances, fixed deposits, mutual funds, PPF, NPS and what you owe on credit cards, built from the statements your institutions already send you. Statements arrive by upload or by read-only email (IMAP); parsers turn them into a SQLite ledger; the web UI shows the result.
 
 Rules that are never relaxed:
-- **Secrets** (app passwords, date of birth, name, PDF passwords) live only in the OS keyring, environment variables or, in a container, a 0600 file. Never log them, commit them or store them in the database.
+- **Each person's data is encrypted for that person alone** (their own key, wrapped by their password and recovery key; see `finance/vault.py`). Secrets, mailbox settings, statements, logs and the ledger live only inside the signed-in profile's vault. Never log a secret, commit one, or add a place (an environment variable, a shared file, a global key) that every profile can read.
 - **IMAP is read-only.** Never delete, move or mark mail.
 - **Nothing leaves the machine.** No statement data is sent to any service.
 - **Money is `Decimal`**, never float.
@@ -41,7 +41,7 @@ Rules that are never relaxed:
 | Credit cards | `icici_card`, `hdfc_card`, `axis_card`, `tata_card` | card arithmetic checked per issuer; due dates, minimum due, credit limit; bill payments linked to the bank debit |
 | NPS | `nps` | monthly, annual and portal statements; per-scheme units and NAV; account-level XIRR when the history is complete |
 
-Also built: **hosted mode and PWA** (installable on a phone; password + authenticator-code sign-in, signed `__Host-` session cookie, throttling, activity log, no-store pages, a service worker that caches only static files; see `docs/HOSTING.md` and `SECURITY.md`); transfer matching between own accounts (shared reference, or card payment by amount and date); duplicate-folio and duplicate-transaction detection with backups before any merge; net worth overview (assets only; card bills shown beside it, not subtracted); card spending by month; local-time rendering; Docker image; sample statements for every layout.
+Also built: **profiles and per-person encryption** (web sign-up with a setup code, invite codes, passkeys and passwords, recovery key, an admin who cannot read anyone's data); **PWA** (installable, caches only static files, never pages); **hosting** on a VPS or Tailscale (`docs/HOSTING.md`, `SECURITY.md`); transfer matching
 
 ---
 
@@ -53,11 +53,13 @@ Also built: **hosted mode and PWA** (installable on a phone; password + authenti
 | Only `finance/ledger.py` writes; others use `connect_ro` (which upgrades an old schema first) | Single writer, auditable. An old DB opened read-only once crashed a page: keep the upgrade in `connect_ro`. |
 | Account identity = keyed hash of `(type, institution, folio)` + `account_aliases` | Raw numbers are never stored. Aliases make a merge permanent for future imports. |
 | Transaction identity for unit-moving rows ignores the date (`strong_key`) | Statements disagree on dates by days to weeks; the running unit balance + NAV do not change. |
-| Destructive actions (merge, cleanup) require a click and write a backup to `data/backups/` | Learned the hard way; real data was inflated by duplicates. |
+| Destructive actions (merge, cleanup) require a click and first take a sealed backup of the ledger (`Vault.snapshot`) | Learned the hard way; real data was inflated by duplicates. |
 | Ambiguity goes to Review, never guessed | Same for missing folios, duplicate folios, transfer matches, unparseable PDFs. |
 | `ParsedStatement` / `Parser.parse(path, password)` plugin contract; parsers registered in `finance/parsers/base.py` `REGISTRY` | Sender rules name a parser; the sync runner dispatches by name. |
-| Secrets: keyring first (service `kosh`), `KOSH_*` env fallback, or the 0600 file store in containers; write-only in the UI | Hard rule. Identity values are only used to build passwords in memory. |
-| Typed password candidates live in keyring (`id:extra_passwords`), never in DB | Custom CAS passwords vary per request. |
+| Secrets are stored only in the signed-in profile's vault (`finance/secrets.py`); no OS keyring, no environment variables, no shared files; write-only in the UI | Anything global would be readable by every profile on the server. Identity values are only used to build passwords in memory. |
+| Typed password candidates live in the profile's vault (`id:extra_passwords`), never in the ledger | Custom CAS passwords vary per request. |
+| The ledger is an in-memory SQLite copy deserialised from a sealed blob and re-sealed on every commit (`finance/vault.py`); one writer per profile at a time, readers get private copies | Keeps the SQL layer unchanged while nothing but ciphertext reaches disk. A long sync therefore makes an import or review action wait (up to 60 s, then "busy"). |
+| "The database" is the context variable `vault.current_vault`, set per request from the session; db paths `vault:db` / `vault:files` mean "the signed-in profile's" | Every route, job and test goes through one switch, so one profile cannot reach another's data by accident. |
 | Bank/PPF/card rows reuse `transactions` (isin '' and units NULL); identity = keyed hash of (account, date, amount, running balance, occurrence) | Banks print a running balance, which makes a row unique and date-stable between overlapping statements. Cards print none: the occurrence index covers identical rows; expect to need a date tolerance there (lesson 2). |
 | A parser must refuse, not guess: the money checks live in `ParsedAccount.integrity_errors()` and the Ledger re-checks | A wrong sign or a dropped row must never reach the ledger; mutation tests cover each gate. |
 | Description lines are split between rows by centring each row's text block on its date line (`_distribute`) | "Nearest date line" fails on exact ties (same line pitch inside and between cells); this was found on real data and has a regression test. |
@@ -74,8 +76,8 @@ See the tree in the README. Conventions:
 - **Change the schema:** add `MIGRATIONS[n]` in `finance/db.py`, bump `SCHEMA_VERSION`, add an upgrade test (see `test_ledger.py`). `ALTER TABLE ... ADD COLUMN` only; SQLite statements run through `executescript`.
 - **Add a review kind:** create items via `Ledger` (`add_review` or a dedicated method), render in `finance/web/templates/review.html` (title map + buttons), add a route in `finance/web/app.py`, mirror in `finance/cli.py`.
 - **Add a UI page:** route in `app.py`, template extending `base.html`, nav entry in `base.html`. `render()` injects `mb` (mailbox labeller); times use the `ts` filter (UTC in the DB, converted to local in the browser).
-- **Add a job action** (a long task started from the UI): `finance/actions.py` `ACTIONS` + branch, `finance/jobs.py` `ACTION_INFO`, a route and button that call `jobs.start`.
-- **Tests:** fixtures in `tests/conftest.py` (`make_cas`, `make_summary`, in-memory keyring autouse) and `tests/mailfix.py` (encrypted PDFs via pypdf, RFC822 messages, strict fake IMAP that fails on any write command). When adding a guarantee, **mutation-check it** (temporarily break the code and confirm tests fail).
+- **Add a job action** (a long task started from the UI): add it to `ACTION_INFO` in `finance/jobs.py` with a function that takes `(params, log)`; jobs run on a thread as the signed-in person and are invisible to everyone else.
+- **Tests:** `tests/conftest.py` gives every test a temporary data folder and a signed-in profile with its own vault (`db_path` is that profile's encrypted ledger, `me` its record); `make_cas` / `make_summary` build CAS data; `tests/mailfix.py` has encrypted PDFs (pypdf), RFC822 messages and a strict fake IMAP that fails on any write command; `tests/softkey.py` is a software passkey; `tests/test_accounts.py` has the multi-profile `Site` helper. When adding a guarantee, **mutation-check it**: break the code on purpose and confirm a test fails.
 
 ---
 
@@ -197,9 +199,9 @@ Findings from the pre-release review that are not fixed yet:
 - **Decrypt cost.** A `{card4}` template tries up to 10,000 passwords, each a full PDF parse. Parse the encryption dictionary once and test against it; add a timeout to sync jobs so one stuck job cannot block the next.
 - **Authentication-Results provenance.** Only the topmost header is trusted today. Also check its authserv-id against the mail provider, and treat custom IMAP hosts that add no header explicitly.
 - Remove the always-allowed `testserver` Host from production code (inject it from tests).
-- Store the ledger hash key in the keyring instead of `data/.hash_key`.
-- **Passkeys (WebAuthn)** as the primary phone sign-in (Face ID / fingerprint, phishing-resistant), after openGym's design: discoverable credentials, one-time enrollment code from the CLI (`add-passkey`), a fresh sign-in required to add or remove one, a signature-counter check, and refusal to remove the last way in. Needs the `webauthn` package. Password + code stays as the recovery path.
-- Optional encryption of the database and the secrets file at rest (SQLCipher / an encrypted secret store), so a copied volume is useless without a key held elsewhere.
+- **Passkey-derived unlock** (WebAuthn PRF / hmac-secret): let a passkey alone unlock a profile's data, so a phone needs a password only once. Support is uneven (recent iOS and Android); the password stays as the fallback.
+- **Unattended sync** (a scheduled mail sync) cannot work while data is locked by design. Options: let a person opt in to keeping their data unlocked, or a per-profile "sync key" that can only append statements. Decide before building scheduling.
+- Keep decrypted statements out of `/tmp` entirely: parse from memory or a tmpfs the app owns, and shred after use.
 - A nonce-based Content-Security-Policy (the templates still use inline scripts and styles, so `'unsafe-inline'` is allowed today).
 - A `SECURITY.md` and a threat model; Content-Security-Policy headers; secret scanning in CI.
 - Pin the Docker base image by digest and the GitHub Actions by commit SHA; hash-locked requirements.
@@ -208,7 +210,7 @@ Findings from the pre-release review that are not fixed yet:
 
 - CI on every push: tests on Python 3.10 to 3.14, lint, type checking, dependency audit, secret scan.
 - Dependabot, release notes, a changelog and semantic versions; publish to PyPI so `pipx install kosh` works.
-- Windows support (keyring, paths, line endings) and a `docker compose` profile for a scheduled sync.
+- Windows support (paths, line endings) and a `docker compose` profile for a scheduled sync.
 - Parser robustness: fuzz and property tests, a corpus of synthetic layouts per issuer, a "verified on a real statement" column in the support matrix.
 - Issue and PR templates that ask for a layout description instead of a real file.
 - Optional auto-merge of duplicate folios when the evidence is overwhelming (same fund house and many identical transactions); always manual today.
@@ -221,7 +223,7 @@ Findings from the pre-release review that are not fixed yet:
 ## 8. Environment gotchas (save time)
 
 - `pdfplumber` is now a runtime dependency (bank statements); pdfminer (via casparser) still checks PDF passwords.
-- Bumping `SCHEMA_VERSION` upgrades `data/finance.db` the first time any code opens it (`connect_ro`/`connect_rw`), additive only. Backups are written to `data/backups/` before destructive actions.
+- Bumping `SCHEMA_VERSION` upgrades a profile's ledger the first time any code opens it (`connect_ro`/`connect_rw`), additive only. Sealed ledger backups are written to the profile's `backups/` folder before destructive actions.
 - **Use `venv/bin/python -m pip ...`**. `venv/bin/pip` belongs to a different Python and silently installs into the wrong place. Development used Python 3.14.
 - macOS `sed -i` needs `sed -i '' ...`; in zsh an unmatched glob aborts the whole command (`rm -f path*` with no matches), so quote or avoid it.
 - **Restart `python main.py ui` after any Python change.** Templates reload; code does not (a stale server once raised `no attribute xirr_funds`).
