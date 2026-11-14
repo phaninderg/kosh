@@ -234,7 +234,8 @@ def test_missing_app_password_is_a_clear_error(db_path, monkeypatch):
 def test_no_secret_ever_reaches_the_database_or_summary(db_path, seen_passwords, tmp_path):
     msgs = {1: make_email(pdf=make_pdf("s3cret!")), 2: make_email(pdf=make_pdf("locked-one"))}
     out = runner(db_path, msgs, inbox=str(tmp_path / "inbox")).run()
-    dump = "\n".join(sqlite3.connect(db_path).iterdump()) + out.render()
+    dump = "\n".join(connect_ro(db_path).iterdump()) + out.render()
+    assert "INSERT INTO" in dump                                                  # the dump is of a real ledger, not an empty file
     for secret in ("s3cret!", APP_PW, "ABCDE1234F", "me@example.invalid", "Test Person", "1990-05-17", "test1705"):
         assert secret not in dump, secret
 
@@ -258,7 +259,8 @@ def test_typed_password_unlocks_and_is_not_remembered_by_default(db_path, seen_p
     assert r.retry(ids[0], password="custom-A") == "imported"
     assert seen_passwords[-1] == "custom-A"
     assert secrets.get_secret("id:extra_passwords") is None                 # one-off: nothing persisted
-    dump = "\n".join(sqlite3.connect(db_path).iterdump())
+    dump = "\n".join(connect_ro(db_path).iterdump())
+    assert "INSERT INTO" in dump                                                  # the dump is of a real ledger, not an empty file
     assert "custom-A" not in dump and "wrong" not in dump
 
 

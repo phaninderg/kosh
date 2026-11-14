@@ -70,6 +70,9 @@ def private_data(tmp_path, monkeypatch):
     monkeypatch.setenv("LEDGER_HASH_KEY", "test-hash-key")
     for k in ("KOSH_ALLOWED_HOSTS", "KOSH_TRUST_PROXY"):
         monkeypatch.delenv(k, raising=False)
+    yield
+    from pathlib import Path
+    assert not Path(vault.VAULT_DB).exists(), "a test opened the 'vault:db' placeholder as if it were a plain file"
 
 
 @pytest.fixture

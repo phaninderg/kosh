@@ -43,7 +43,8 @@ def test_email_details_are_recorded_and_masked(db_path, seen_passwords, tmp_path
     assert d["size"] > 0 and d["status"] == "imported" and d["period_to"] == "2025-01-31"
     assert d["subject"] == "CAS for ••• •••" or ("Test" not in d["subject"] and "ABCDE" not in d["subject"])
     assert "ABCDE1234F" not in d["filename"] and d["filename"].endswith("_CAS.pdf")
-    dump = "\n".join(sqlite3.connect(db_path).iterdump())
+    dump = "\n".join(connect_ro(db_path).iterdump())
+    assert "INSERT INTO" in dump                                                  # the dump is of a real ledger, not an empty file
     assert "Test Person" not in dump and "ABCDE1234F" not in dump
 
 
