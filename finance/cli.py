@@ -124,3 +124,28 @@ def review(argv: list[str]) -> int:
         ledger.close()
     print("done")
     return 0
+
+
+def set_password(totp: bool = True) -> int:
+    """Create or replace the login for a hosted instance. Replacing it signs every device out."""
+    import getpass
+    from finance.web import auth
+    first = getpass.getpass("New password (12+ characters): ")
+    if len(first) < 12:
+        print("Too short: use at least 12 characters (a few random words is fine).")
+        return 1
+    if getpass.getpass("Again: ") != first:
+        print("The two entries differ; nothing was changed.")
+        return 1
+    secret = auth.new_totp_secret() if totp else None
+    auth.save_credentials(auth.hash_password(first), secret)
+    auth.rotate_session_key()
+    print("Password saved (stored as a salted scrypt hash in data/auth.json).")
+    if secret:
+        print("\nAdd Kosh to your authenticator app (Google Authenticator, Authy, 1Password...):")
+        print(f"  key:  {secret}")
+        print(f"  link: {auth.totp_uri(secret)}")
+        print("This is shown once. Enter a code from the app each time you sign in.")
+    else:
+        print("No authenticator code: anyone with the password can sign in. Use this only behind a private network.")
+    return 0

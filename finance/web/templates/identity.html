@@ -12,4 +12,11 @@
  <label>Remembered one-off PDF passwords — <b class="{{ 'good' if extra_count else 'mute' }}">{{ extra_count }} saved</b>{% if extra_count %} <span style="font-weight:normal"><input type="checkbox" name="clear_extra" value="1" style="width:auto"> clear all</span>{% endif %}</label>
  <p class="mute">Added from the Review queue when you tick “Remember”, for any statement type. Tried after your templates and the default password above.</p>
 </div>
- <p><button>Save</button></p></form>{% endblock %}
+ <p><button>Save</button></p></form>
+{% if login_mode %}<form method="post" action="/logout" class="card"><h2 class="sec">Signed-in devices</h2>
+ <p class="mute">Signs this and every other phone or browser out. Do this if a device is lost.</p>
+ <input type="hidden" name="everywhere" value="1"><button class="sec">Sign out everywhere</button></form>
+{% if activity %}<div class="card wrap"><h2 class="sec">Recent sign-in activity</h2>
+ <p class="mute">Newest first, in your local time. Anything here you do not recognise means the password may be known: change it and sign out everywhere.</p>
+ <table><tr><th>When</th><th>What</th><th>From</th></tr>
+ {% for e in activity %}<tr><td>{{ e.at|ts }}</td><td class="{{ 'good' if e.ok else 'bad' }}">{{ e.event }}</td><td class="mute">{{ e['from'] or '—' }}</td></tr>{% endfor %}</table></div>{% endif %}{% endif %}{% endblock %}

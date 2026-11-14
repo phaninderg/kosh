@@ -8,6 +8,7 @@ Commands:
                                              — import a bank, card or NPS statement PDF
   python main.py sync [--account=NAME]       — fetch new statements from your mailboxes (read-only IMAP)
   python main.py review [id action]          — list / act on the review queue (retry|dismiss|close|keep|merge|separate|clean|resolve)
+  python main.py set-password [--no-totp]    — set the login password (and an authenticator code) for a hosted instance
   python main.py review scan | merge-all     — find duplicates in existing data / merge every open duplicate-folio pair
 """
 
@@ -16,7 +17,7 @@ from __future__ import annotations
 import os
 import sys
 
-COMMANDS = ("ui", "import-cas", "import-statement", "sync", "review")
+COMMANDS = ("ui", "import-cas", "import-statement", "sync", "review", "set-password")
 
 
 def main(argv: list[str]) -> int:
@@ -30,6 +31,9 @@ def main(argv: list[str]) -> int:
         from finance.web.server import serve
         serve()
         return 0
+    if command == "set-password":
+        from finance.cli import set_password
+        return set_password(totp="--no-totp" not in argv)
     if command == "import-cas":
         from config import CAS_PASSWORD
         from finance.importer import import_file

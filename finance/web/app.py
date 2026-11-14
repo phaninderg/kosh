@@ -9,7 +9,7 @@ import tempfile
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 from markupsafe import Markup
 from fastapi import FastAPI, File, Form, Request, UploadFile
@@ -17,10 +17,11 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Red
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from config import BACKUP_DIR, CAS_PASSWORD, DB_PATH, MAIL_CONFIG_PATH, PUBLIC_PORT, UI_HOST, UI_PORT
+from config import ALLOWED_HOSTS, AUTH_MODE, BACKUP_DIR, CAS_PASSWORD, DB_PATH, MAIL_CONFIG_PATH, PUBLIC_PORT, UI_HOST, UI_PORT
 from finance import analytics
 from finance.db import connect_ro
 from finance.jobs import ACTION_INFO, JobManager
+from finance.web import auth as auth_mod, pwa
 
 HERE = Path(__file__).parent
 COOKIE = f"kosh_session_{PUBLIC_PORT}"        # browsers share cookies across ports of one host; the port in the name keeps other localhost services' from clashing
@@ -52,25 +53,52 @@ def ts(value) -> Markup:
     return Markup('<time class="ts" datetime="{}">{} UTC</time>').format(iso, str(value))
 
 
+CSP = ("default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+       "connect-src 'self'; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+ANONYMOUS_PATHS = {"/manifest.webmanifest", "/sw.js"}          # fetched by the browser without cookies; contain nothing private
+
+
 def create_app(token: str, db_path: str = DB_PATH, jobs: JobManager | None = None,
-               mail_config_path: str = MAIL_CONFIG_PATH, imap_connect=None) -> FastAPI:
+               mail_config_path: str = MAIL_CONFIG_PATH, imap_connect=None, auth: str = AUTH_MODE,
+               credentials=auth_mod.load_credentials, extra_hosts: list[str] | None = None) -> FastAPI:
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     templates = Jinja2Templates(directory=str(HERE / "templates"))
     templates.env.filters["inr"] = inr
     templates.env.filters["ts"] = ts
     jobs = jobs or JobManager()
     allowed_hosts = {f"{h}:{p}" for h in (UI_HOST, "localhost", "127.0.0.1") for p in (UI_PORT, PUBLIC_PORT)} | {"testserver"}
+    allowed_hosts |= set(ALLOWED_HOSTS if extra_hosts is None else extra_hosts)       # the domain a hosted instance answers to
+    login_mode = auth == "login"
+    throttle, totp = auth_mod.Throttle(), auth_mod.TotpVerifier()
+
+    def session_token(request: Request) -> str:
+        return auth_mod.cookie_value(request.headers.get("cookie", ""), auth_mod.cookie_name(request.url.scheme == "https"))
+    pwa.register(app)
 
     app.mount("/static", StaticFiles(directory=str(HERE / "static")), name="static")
 
-    @app.middleware("http")
-    async def guard(request: Request, call_next):
-        if request.headers.get("host", "") not in allowed_hosts:          # DNS-rebinding defence
+    async def check(request: Request, call_next):
+        path = request.url.path
+        if request.headers.get("host", "").lower() not in allowed_hosts:          # DNS-rebinding defence
             return PlainTextResponse("bad host", status_code=400)
         if request.method == "POST":                                    # cross-site form posts
             origin = request.headers.get("origin") or request.headers.get("referer")
-            if not origin or urlparse(origin).netloc != request.headers["host"]:      # a browser always sends one of them
+            if not origin or urlparse(origin).netloc.lower() != request.headers["host"].lower():   # a browser always sends one
                 return PlainTextResponse("bad origin", status_code=403)
+        if path in ANONYMOUS_PATHS or path.startswith("/static/icons/"):
+            return await call_next(request)
+        if login_mode:
+            creds = credentials()
+            if creds is None:
+                return PlainTextResponse("No password is set. Run `python main.py set-password`.", status_code=503)
+            if path == "/login" or path.startswith("/static/"):            # the login page needs its stylesheet
+                return await call_next(request)
+            if auth_mod.session_valid(session_token(request), creds):
+                return await call_next(request)
+            if request.method == "GET" and "text/html" in request.headers.get("accept", ""):
+                target = path + (f"?{request.url.query}" if request.url.query else "")
+                return RedirectResponse(f"/login?{urlencode({'next': target})}", status_code=303)
+            return PlainTextResponse("sign in required", status_code=401)
         supplied = request.query_params.get("token")
         if supplied and secrets.compare_digest(supplied, token):
             resp = RedirectResponse(request.url.path, status_code=303)
@@ -81,6 +109,77 @@ def create_app(token: str, db_path: str = DB_PATH, jobs: JobManager | None = Non
                                      status_code=401)
         return await call_next(request)
 
+    @app.middleware("http")
+    async def guard(request: Request, call_next):
+        resp = await check(request, call_next)
+        resp.headers["X-Content-Type-Options"] = "nosniff"
+        resp.headers["Referrer-Policy"] = "no-referrer"
+        resp.headers["X-Frame-Options"] = "DENY"
+        resp.headers["Content-Security-Policy"] = CSP
+        if not request.url.path.startswith("/static/") and "cache-control" not in resp.headers:
+            resp.headers["Cache-Control"] = "no-store"             # figures and statements are never kept by the browser
+        if request.url.scheme == "https":
+            resp.headers["Strict-Transport-Security"] = "max-age=31536000"
+        return resp
+
+    # ── login (hosted instances only) ─────────────────────────────────────────────
+
+    def login_page(request: Request, *, error: str = "", next_: str = "/", status: int = 200):
+        creds = credentials()
+        return templates.TemplateResponse(request, "login.html", {"error": error, "next": next_,
+                                          "needs_code": bool(creds and creds[1])}, status_code=status)
+
+    if login_mode:
+        @app.get("/login", response_class=HTMLResponse)
+        def login_form(request: Request, next: str = "/"):
+            creds = credentials()
+            if creds and auth_mod.session_valid(session_token(request), creds):
+                return RedirectResponse(auth_mod.safe_next(next), status_code=303)
+            return login_page(request, next_=auth_mod.safe_next(next))
+
+        @app.post("/login", response_class=HTMLResponse)
+        async def login_submit(request: Request):
+            form = await request.form()
+            target = auth_mod.safe_next(str(form.get("next", "/")))
+            client = auth_mod.client_key(request.client.host if request.client else "unknown")
+            wait = throttle.retry_after(client)
+            if wait:
+                auth_mod.audit("sign-in refused: too many attempts", False, client)
+                resp = login_page(request, error=f"Too many attempts. Try again in {-(-wait // 60)} minute(s).",
+                                  next_=target, status=429)
+                resp.headers["Retry-After"] = str(wait)
+                return resp
+            creds = credentials()
+            try:
+                password_ok = await auth_mod.check_password(str(form.get("password", "")), creds[0])
+            except auth_mod.Busy:
+                return login_page(request, error="The server is busy checking other sign-ins. Try again in a moment.",
+                                  next_=target, status=503)
+            code_ok = password_ok and (creds[1] is None or totp.verify(creds[1], str(form.get("code", ""))))   # a code is spent only by a correct password
+            if not (password_ok and code_ok):                         # one message for every kind of failure
+                throttle.failed(client)
+                auth_mod.audit("sign-in failed", False, client)
+                return login_page(request, error="Incorrect password or code.", next_=target, status=401)
+            throttle.succeeded(client)
+            auth_mod.audit("signed in", True, client)
+            secure = request.url.scheme == "https"
+            resp = RedirectResponse(target, status_code=303)
+            resp.set_cookie(auth_mod.cookie_name(secure), auth_mod.issue_session(creds), max_age=auth_mod.SESSION_SECONDS,
+                            httponly=True, samesite="strict", secure=secure, path="/")
+            return resp
+
+        @app.post("/logout")
+        async def logout(request: Request):
+            everywhere = bool((await request.form()).get("everywhere"))
+            if everywhere:
+                auth_mod.rotate_session_key()                          # every phone and browser must sign in again
+            auth_mod.audit("signed out everywhere" if everywhere else "signed out", True,
+                           auth_mod.client_key(request.client.host if request.client else "unknown"))
+            secure = request.url.scheme == "https"
+            resp = RedirectResponse("/login", status_code=303)
+            resp.delete_cookie(auth_mod.cookie_name(secure), path="/", secure=secure, httponly=True, samesite="strict")
+            return resp
+
     def open_review_count() -> int:
         conn = connect_ro(db_path)
         try:
@@ -89,7 +188,8 @@ def create_app(token: str, db_path: str = DB_PATH, jobs: JobManager | None = Non
             conn.close()
 
     def render(request: Request, name: str, **ctx):
-        return templates.TemplateResponse(request, name, {"mb": make_labeler(), "review_open": open_review_count(), **ctx})
+        return templates.TemplateResponse(request, name, {"mb": make_labeler(), "review_open": open_review_count(),
+                                                          "login_mode": login_mode, **ctx})
 
     # ── overview (the landing page) and the mutual fund portfolio ────────────────
 
@@ -384,6 +484,7 @@ def create_app(token: str, db_path: str = DB_PATH, jobs: JobManager | None = Non
         ident = Identity()
         return dict(page="identity", flash=flash, error=error,
                     extra_count=len(ident.extra_passwords()),
+                    activity=auth_mod.recent_events() if login_mode else [],
                     fields=[(k, v, secret_store.has_secret(f"id:{k}")) for k, v in IDENTITY_LABELS.items()])
 
     @app.get("/identity", response_class=HTMLResponse)

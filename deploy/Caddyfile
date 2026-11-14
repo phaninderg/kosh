@@ -1,0 +1,7 @@
+{$KOSH_DOMAIN} {
+	encode zstd gzip
+	request_body {
+		max_size 60MB          # a statement upload; the app enforces 50 MB per file itself
+	}
+	reverse_proxy kosh:8765
+}

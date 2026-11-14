@@ -41,7 +41,7 @@ Rules that are never relaxed:
 | Credit cards | `icici_card`, `hdfc_card`, `axis_card`, `tata_card` | card arithmetic checked per issuer; due dates, minimum due, credit limit; bill payments linked to the bank debit |
 | NPS | `nps` | monthly, annual and portal statements; per-scheme units and NAV; account-level XIRR when the history is complete |
 
-Also built: transfer matching between own accounts (shared reference, or card payment by amount and date); duplicate-folio and duplicate-transaction detection with backups before any merge; net worth overview (assets only; card bills shown beside it, not subtracted); card spending by month; local-time rendering; Docker image; sample statements for every layout.
+Also built: **hosted mode and PWA** (installable on a phone; password + authenticator-code sign-in, signed `__Host-` session cookie, throttling, activity log, no-store pages, a service worker that caches only static files; see `docs/HOSTING.md` and `SECURITY.md`); transfer matching between own accounts (shared reference, or card payment by amount and date); duplicate-folio and duplicate-transaction detection with backups before any merge; net worth overview (assets only; card bills shown beside it, not subtracted); card spending by month; local-time rendering; Docker image; sample statements for every layout.
 
 ---
 
@@ -198,7 +198,9 @@ Findings from the pre-release review that are not fixed yet:
 - **Authentication-Results provenance.** Only the topmost header is trusted today. Also check its authserv-id against the mail provider, and treat custom IMAP hosts that add no header explicitly.
 - Remove the always-allowed `testserver` Host from production code (inject it from tests).
 - Store the ledger hash key in the keyring instead of `data/.hash_key`.
-- Optional encryption of the database at rest (SQLCipher), an optional UI password, and HTTPS for people who must expose the port.
+- **Passkeys (WebAuthn)** as the primary phone sign-in (Face ID / fingerprint, phishing-resistant), after openGym's design: discoverable credentials, one-time enrollment code from the CLI (`add-passkey`), a fresh sign-in required to add or remove one, a signature-counter check, and refusal to remove the last way in. Needs the `webauthn` package. Password + code stays as the recovery path.
+- Optional encryption of the database and the secrets file at rest (SQLCipher / an encrypted secret store), so a copied volume is useless without a key held elsewhere.
+- A nonce-based Content-Security-Policy (the templates still use inline scripts and styles, so `'unsafe-inline'` is allowed today).
 - A `SECURITY.md` and a threat model; Content-Security-Policy headers; secret scanning in CI.
 - Pin the Docker base image by digest and the GitHub Actions by commit SHA; hash-locked requirements.
 

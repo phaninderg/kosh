@@ -25,4 +25,10 @@ JOBS_DIR         = str(_ROOT / "data" / "jobs")                 # logs of runs s
 # loopback only (see docker-compose.yml). Never expose the port on a network.
 UI_HOST = os.getenv("KOSH_HOST", "127.0.0.1")
 UI_PORT = int(os.getenv("UI_PORT", "8765"))
+# KOSH_AUTH=login turns on the password (and optional authenticator code) login for a hosted instance, in place of the
+# per-launch token. KOSH_ALLOWED_HOSTS names the domain(s) the app answers to, e.g. "kosh.example.com"; KOSH_TRUST_PROXY=1
+# says a reverse proxy (Caddy, nginx, Tailscale serve) in front is the only thing that can reach the app.
+AUTH_MODE = os.getenv("KOSH_AUTH", "token")
+ALLOWED_HOSTS = [h.strip().lower() for h in os.getenv("KOSH_ALLOWED_HOSTS", "").split(",") if h.strip()]
+TRUST_PROXY = os.getenv("KOSH_TRUST_PROXY") == "1"
 PUBLIC_PORT = int(os.getenv("KOSH_PUBLIC_PORT", UI_PORT))     # the port your browser uses, when a container publishes it elsewhere

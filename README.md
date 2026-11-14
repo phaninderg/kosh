@@ -62,13 +62,15 @@ First run in the UI:
 2. **Import**: upload a *detailed* CAS PDF (CAMS / KFintech / MF Central), or set up **Mailboxes** and press **Sync now**.
 3. **Overview** shows your net worth; **Mutual funds** has holdings, invested, value, XIRR. If the red "not reliable" banner appears, open **Review**.
 
+**On your phone:** Kosh is an installable web app (PWA). Run it on a small server with a password and HTTPS, then Add to Home Screen. Steps, with a Tailscale option that keeps it off the public internet, are in [docs/HOSTING.md](docs/HOSTING.md); what is and is not protected is in [SECURITY.md](SECURITY.md).
+
 Restart `python main.py ui` after pulling code changes: templates reload by themselves, Python code does not.
 
 ## Testing and development
 
 ```bash
 python -m pip install -r requirements-dev.txt
-python -m pytest                      # 359 tests; no network, no real data, no real keyring or mailbox
+python -m pytest                      # 388 tests; no network, no real data, no real keyring or mailbox
 ```
 
 - Tests use synthetic fixtures only and an in-memory keyring (an autouse fixture prevents any test from touching your Keychain or `data/`).

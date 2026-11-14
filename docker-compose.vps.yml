@@ -1,0 +1,34 @@
+# Kosh on your own server, reachable from your phone over HTTPS. See docs/HOSTING.md.
+#   1. point a DNS name at the server, then:  echo "KOSH_DOMAIN=kosh.example.com" > .env
+#   2. docker compose -f docker-compose.vps.yml up -d
+#   3. docker compose -f docker-compose.vps.yml exec kosh python main.py set-password
+services:
+  kosh:
+    image: ghcr.io/phaninderg/kosh:latest
+    restart: unless-stopped
+    environment:
+      KOSH_AUTH: login
+      KOSH_ALLOWED_HOSTS: ${KOSH_DOMAIN:?set KOSH_DOMAIN in .env, e.g. kosh.example.com}
+      KOSH_TRUST_PROXY: "1"                 # only Caddy, on the private compose network, can reach the app
+    volumes:
+      - kosh-data:/app/data
+    expose:
+      - "8765"                              # not published: the only way in is through Caddy
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on: [kosh]
+    environment:
+      KOSH_DOMAIN: ${KOSH_DOMAIN}
+    ports:
+      - "80:80"                             # Let's Encrypt challenge and the redirect to https
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data                    # the certificate; keep it so renewals do not start from scratch
+
+volumes:
+  kosh-data:
+  caddy-data:
