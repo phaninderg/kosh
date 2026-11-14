@@ -126,9 +126,10 @@ def test_a_ledger_backup_is_sealed_and_can_be_opened_only_by_its_owner(db_path, 
     v = vault.current_vault.get()
     snap = v.snapshot()
     assert snap.read_bytes().startswith(vault.MAGIC) and b"SQLite format" not in snap.read_bytes()
-    assert v.open_snapshot(snap).execute("select count(*) from accounts").fetchone()[0] == 1
+    from tests.conftest import open_sealed_backup
+    assert open_sealed_backup(snap).execute("select count(*) from accounts").fetchone()[0] == 1
     with pytest.raises(vault.VaultError):
-        vault.Vault("other", b"y" * 32).open_snapshot(snap)
+        vault.unseal(b"y" * 32, snap.read_bytes(), aad=b"ledger")                  # another key cannot open it
 
 
 # ── sealed files ──────────────────────────────────────────────────────────

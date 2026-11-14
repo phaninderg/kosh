@@ -95,6 +95,16 @@ def me(users, registry):
     vault.current_vault.reset(token)
 
 
+def open_sealed_backup(path):
+    """A ledger backup made by Vault.snapshot(), opened in memory with the signed-in profile's key (a test helper: the app has no restore yet)."""
+    import sqlite3
+    from pathlib import Path
+    from finance import vault
+    conn = sqlite3.connect(":memory:")
+    conn.deserialize(vault.unseal(vault.require_vault()._dek, Path(path).read_bytes(), aad=b"ledger"))
+    return conn
+
+
 @pytest.fixture
 def db_path(me):
     """The signed-in profile's encrypted ledger."""

@@ -321,14 +321,6 @@ class Vault:
                 self._master = data
         conn._persisted_changes = conn.total_changes
 
-    def open_snapshot(self, path: Path) -> sqlite3.Connection:
-        """A snapshot made by snapshot(), opened in memory (to inspect or restore it)."""
-        self._check()
-        conn = sqlite3.connect(":memory:")
-        conn.deserialize(unseal(self._dek, Path(path).read_bytes(), aad=b"ledger"))
-        conn.row_factory = sqlite3.Row
-        return conn
-
     def snapshot(self, directory: Path | None = None) -> Path:
         """A timestamped copy of the sealed ledger (already encrypted, so it is safe to store anywhere)."""
         with self._lock:

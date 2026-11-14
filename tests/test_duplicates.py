@@ -128,8 +128,8 @@ def test_merge_validation_and_backup(db_path, tmp_path):
     backup = led.backup(str(tmp_path / "bk"))
     led.close()
     assert oct(__import__("os").stat(backup).st_mode & 0o777) == "0o600"
-    from finance import vault
-    assert vault.require_vault().open_snapshot(backup).execute("select count(*) from accounts").fetchone()[0] == 2
+    from tests.conftest import open_sealed_backup
+    assert open_sealed_backup(backup).execute("select count(*) from accounts").fetchone()[0] == 2
 
 
 def test_statements_that_date_transactions_differently_are_still_the_same_folio(db_path):
