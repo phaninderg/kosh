@@ -17,9 +17,8 @@ import json
 import secrets
 import time
 from types import SimpleNamespace
-from urllib.parse import urlparse
 
-from fastapi import Form, Request
+from fastapi import Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from webauthn import (generate_authentication_options, generate_registration_options, verify_authentication_response,
                       verify_registration_response, base64url_to_bytes)
@@ -33,6 +32,7 @@ from finance.web import auth as auth_mod
 FRESH_SECONDS = 10 * 60          # adding or removing a way in needs a sign-in from the last ten minutes
 CHALLENGE_TTL = 5 * 60
 MAX_CHALLENGES = 5000
+MAX_PER_CLIENT = 20
 
 
 class Challenges:
@@ -43,11 +43,19 @@ class Challenges:
         self._items: dict[str, dict] = {}
         self._clock = clock
 
-    def put(self, kind: str, challenge: bytes, **extra) -> str:
+    def put(self, kind: str, challenge: bytes, client: str = "", **extra) -> str:
+        """Expired challenges go first; one client can hold only MAX_PER_CLIENT, so a flood from one address evicts its own
+        older ones and never someone else's."""
+        now = self._clock()
+        for cid in [c for c, i in self._items.items() if i["exp"] <= now]:
+            del self._items[cid]
+        mine = [c for c, i in self._items.items() if i.get("client") == client]
+        for cid in mine[:max(0, len(mine) - MAX_PER_CLIENT + 1)]:
+            del self._items[cid]
         while len(self._items) >= MAX_CHALLENGES:
             self._items.pop(next(iter(self._items)))
         cid = secrets.token_urlsafe(16)
-        self._items[cid] = {"kind": kind, "challenge": challenge, "exp": self._clock() + CHALLENGE_TTL, **extra}
+        self._items[cid] = {"kind": kind, "challenge": challenge, "exp": now + CHALLENGE_TTL, "client": client, **extra}
         return cid
 
     def take(self, cid: str, kind: str) -> dict | None:
@@ -90,8 +98,10 @@ def register(app, env: SimpleNamespace) -> None:
         s = auth_mod.read_session(auth_mod.cookie_value(request.headers.get("cookie", ""), auth_mod.cookie_name(request.url.scheme == "https")))
         return bool(s and time.time() - auth_mod.issued_at(s[2]) <= FRESH_SECONDS)
 
-    def throttled(request: Request, what: str):
-        wait = throttle.retry_after(client(request))
+    def throttled(request: Request, what: str, key: str | None = None):
+        """Count this attempt now (so parallel guesses cannot all slip through) and return how long to wait, if at all.
+        `key` is the profile for someone signed in, so a stranger can never lock them out; otherwise the client address."""
+        wait = throttle.reserve(key or client(request))
         if wait:
             auth_mod.audit(f"{what} refused: too many attempts", False, client(request))
         return wait
@@ -128,7 +138,6 @@ def register(app, env: SimpleNamespace) -> None:
         try:
             user, dek, recovery = await auth_mod.run_limited(users.sign_up, f.get("name", ""), f.get("password", ""), f.get("code", ""))
         except users_mod.UserError as exc:
-            throttle.failed(client(request))
             auth_mod.audit("sign-up failed", False, client(request))
             return page(request, "signup.html", 400, error=str(exc), code=f.get("code", ""), name=f.get("name", ""))
         except auth_mod.Busy:
@@ -162,7 +171,6 @@ def register(app, env: SimpleNamespace) -> None:
         except auth_mod.Busy:
             return busy(request, "login.html", next=target)
         if not found:
-            throttle.failed(client(request))
             auth_mod.audit("sign-in failed", False, client(request), f.get("name", "")[:40])
             return page(request, "login.html", 401, error="Incorrect name or password.", next=target, name=f.get("name", ""))
         user, dek = found
@@ -194,7 +202,7 @@ def register(app, env: SimpleNamespace) -> None:
         user = request.state.user
         f = await read_form(request)
         target = auth_mod.safe_next(f.get("next", "/"))
-        wait = throttled(request, "unlock")
+        wait = throttled(request, "unlock", f"uid:{user['id']}")
         if wait:
             return too_many(request, "unlock.html", wait, next=target)
         try:
@@ -202,10 +210,9 @@ def register(app, env: SimpleNamespace) -> None:
         except auth_mod.Busy:
             return busy(request, "unlock.html", next=target)
         if not dek:
-            throttle.failed(client(request))
             auth_mod.audit("unlock failed", False, client(request), user["name"])
             return page(request, "unlock.html", 401, error="Incorrect password.", next=target)
-        throttle.succeeded(client(request))
+        throttle.succeeded(f"uid:{user['id']}")
         env.after_unlock(registry.unlock(user["id"], dek))
         auth_mod.audit("unlocked", True, client(request), user["name"])
         return RedirectResponse(target, status_code=303)
@@ -237,7 +244,6 @@ def register(app, env: SimpleNamespace) -> None:
         except auth_mod.Busy:
             return busy(request, "recover.html")
         if not found:
-            throttle.failed(client(request))
             auth_mod.audit("recovery failed", False, client(request), f.get("name", "")[:40])
             return page(request, "recover.html", 401, error="That name and recovery key do not match.", name=f.get("name", ""))
         user, dek, recovery = found
@@ -267,7 +273,7 @@ def register(app, env: SimpleNamespace) -> None:
     @app.post("/account/password", response_class=HTMLResponse)
     async def change_password(request: Request):
         user, f = request.state.user, await read_form(request)
-        wait = throttled(request, "password change")
+        wait = throttled(request, "password change", f"uid:{user['id']}")
         if wait:
             return render_account(request, 429, error=f"Too many attempts. Try again in {-(-wait // 60)} minute(s).")
         if f.get("new") != f.get("confirm"):
@@ -275,7 +281,6 @@ def register(app, env: SimpleNamespace) -> None:
         try:
             dek = await auth_mod.run_limited(users.open_with_uid, user["id"], f.get("current", ""))
             if not dek:
-                throttle.failed(client(request))
                 auth_mod.audit("password change failed", False, client(request), user["name"])
                 return render_account(request, 401, error="Your current password is not right.")
             await auth_mod.run_limited(users.change_password, user["id"], dek, f.get("new", ""))
@@ -283,7 +288,7 @@ def register(app, env: SimpleNamespace) -> None:
             return render_account(request, 400, error=str(exc))
         except auth_mod.Busy:
             return render_account(request, 503, error="The server is busy. Try again in a moment.")
-        throttle.succeeded(client(request))
+        throttle.succeeded(f"uid:{user['id']}")
         auth_mod.audit("password changed", True, client(request), user["name"])
         fresh_user = users.get(user["id"])
         resp = RedirectResponse("/account?flash=Password+changed.+Other+devices+were+signed+out.", status_code=303)
@@ -295,7 +300,7 @@ def register(app, env: SimpleNamespace) -> None:
     @app.post("/account/recovery-key", response_class=HTMLResponse)
     async def new_recovery(request: Request):
         user, f = request.state.user, await read_form(request)
-        wait = throttled(request, "recovery key")
+        wait = throttled(request, "recovery key", f"uid:{user['id']}")
         if wait:
             return render_account(request, 429, error=f"Too many attempts. Try again in {-(-wait // 60)} minute(s).")
         try:
@@ -303,7 +308,6 @@ def register(app, env: SimpleNamespace) -> None:
         except auth_mod.Busy:
             return render_account(request, 503, error="The server is busy. Try again in a moment.")
         if not dek:
-            throttle.failed(client(request))
             return render_account(request, 401, error="Your current password is not right.")
         recovery = users.new_recovery_key(user["id"], dek)
         auth_mod.audit("recovery key replaced", True, client(request), user["name"])
@@ -321,7 +325,7 @@ def register(app, env: SimpleNamespace) -> None:
             authenticator_selection=AuthenticatorSelectionCriteria(resident_key=ResidentKeyRequirement.REQUIRED,
                                                                    user_verification=UserVerificationRequirement.REQUIRED),
             exclude_credentials=descriptors(user))
-        cid = challenges.put(kind, options.challenge, uid=user["id"], **extra)
+        cid = challenges.put(kind, options.challenge, client(request), uid=user["id"], **extra)
         return JSONResponse({"cid": cid, "options": options_to_json_dict(options)})
 
     def finish_registration(request: Request, body: dict, kind: str) -> tuple[dict | None, str]:
@@ -384,7 +388,7 @@ def register(app, env: SimpleNamespace) -> None:
     async def passkey_login_options(request: Request):
         rp_id, _ = relying_party(request)
         options = generate_authentication_options(rp_id=rp_id, user_verification=UserVerificationRequirement.REQUIRED, allow_credentials=[])
-        return JSONResponse({"cid": challenges.put("login", options.challenge), "options": options_to_json_dict(options)})
+        return JSONResponse({"cid": challenges.put("login", options.challenge, client(request)), "options": options_to_json_dict(options)})
 
     @app.post("/auth/passkey/login/verify")
     async def passkey_login_verify(request: Request):
@@ -424,22 +428,20 @@ def register(app, env: SimpleNamespace) -> None:
         wait = throttled(request, "device code")
         if wait:
             return JSONResponse({"error": f"Too many attempts. Try again in {-(-wait // 60)} minute(s)."}, status_code=429)
-        user = users.find_device_code(str(body.get("code", "")))
+        code = str(body.get("code", ""))
+        user = users.find_device_code(code)
         if not user or user["disabled"]:
-            throttle.failed(client(request))
             return JSONResponse({"error": "That code is not valid or has expired."}, status_code=400)
-        return creation_options(request, user, "link", code=str(body.get("code", "")))
+        throttle.succeeded(client(request))
+        users.burn_device_code(code)                                 # claimed now: one code starts one registration, never several
+        return creation_options(request, user, "link")
 
     @app.post("/auth/link/verify")
     async def link_verify(request: Request):
         body = await request.json()
-        cid = str(body.get("cid", ""))
-        item = challenges._items.get(cid)
-        code = item.get("code") if item else None
         user, err = finish_registration(request, body, "link")
         if not user:
             return JSONResponse({"error": err}, status_code=400)
-        users.burn_device_code(code or "")                           # one code, one passkey
         auth_mod.audit("passkey added with a device code", True, client(request), user["name"])
         return JSONResponse({"ok": True})
 
@@ -485,11 +487,13 @@ def register(app, env: SimpleNamespace) -> None:
             if action == "delete" and f.get("confirm", "").strip().casefold() != target["name"].casefold():
                 raise users_mod.UserError(f"To remove {target['name']} and all their data for good, type their name to confirm.")
             if action == "delete":
+                users.ensure_removable(uid)
+                registry.lock(uid)                                   # closes the vault first, so a running job cannot recreate its folder
                 users.delete(uid)
-                registry.lock(uid)
             else:
                 users.set_disabled(uid, action == "disable")
-                registry.lock(uid) if action == "disable" else None
+                if action == "disable":
+                    registry.lock(uid)
             auth_mod.audit(f"profile {action}d", True, client(request), request.state.user["name"])
         except users_mod.UserError as exc:
             return render_admin(request, 400, error=str(exc))

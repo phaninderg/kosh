@@ -8,6 +8,7 @@ templates, then the defaults). The resolved password exists only in memory.
 from __future__ import annotations
 
 import io
+import time
 import re
 from datetime import date, datetime
 
@@ -19,6 +20,7 @@ _TOKEN = re.compile(r"\{([A-Za-z0-9_]+)\}")
 _SIMPLE = {"ddmm", "ddmmyy", "ddmmyyyy", "yyyy", "pan", "PAN", "password", "cas_password", "card4"}
 _PARAM = re.compile(r"(name|NAME|mobile)(\d{1,2})$")
 CARD4_SPACE = 10000          # every 4-digit card ending; the last-resort search for a {card4} template
+CARD4_BUDGET_SECONDS = 20    # ...but never longer than this per file: it runs while a person waits, and a hostile file must not hold a worker
 
 
 class MissingValue(Exception):
@@ -188,11 +190,14 @@ class DecryptAgent:
                 missing.update(exc.fields)
         for t in (t for t in ordered if "{card4}" in t):  # last resort, a new card: every 4-digit ending, once
             seen = set(self.card4s)
+            deadline = time.monotonic() + CARD4_BUDGET_SECONDS
             try:
                 for n in range(CARD4_SPACE):
                     d = f"{n:04d}"
                     if d in seen:
                         continue
+                    if time.monotonic() > deadline:
+                        break
                     tried += 1
                     pw = self.identity.resolve(t, d)
                     if pdf_opens(pdf, pw)[0]:

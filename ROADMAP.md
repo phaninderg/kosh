@@ -195,16 +195,17 @@ Everything below is unclaimed. Items are roughly ordered by how many people they
 
 ### 7.9 Security and privacy hardening
 
-Findings from the pre-release review that are not fixed yet:
-- **Decrypt cost.** A `{card4}` template tries up to 10,000 passwords, each a full PDF parse. Parse the encryption dictionary once and test against it; add a timeout to sync jobs so one stuck job cannot block the next.
-- **Authentication-Results provenance.** Only the topmost header is trusted today. Also check its authserv-id against the mail provider, and treat custom IMAP hosts that add no header explicitly.
-- Remove the always-allowed `testserver` Host from production code (inject it from tests).
+Independent reviews were done before release. The exploitable findings that could be fixed cheaply were fixed (see `SECURITY.md` for what the app does now and what it does not). What is still open:
+
+- **Sandbox PDF parsing.** A hostile PDF (a decompression bomb) can use a lot of memory or CPU while it is read. Parse in a subprocess with `RLIMIT_AS` / `RLIMIT_CPU` and a wall-clock timeout, cap pages and characters, and test the card-ending password search against the PDF's encryption dictionary once instead of re-opening the file 10,000 times (it is time-boxed to 20 s today).
+- **Ledger rollback.** Someone who can write to the disk can put back an older sealed ledger or backup, and it decrypts. Put a monotonic version in the AAD and keep the current version in the profile's key record.
+- **Supply chain.** Pin the GitHub Actions by commit SHA and the base images (`python`, `caddy`) by digest, use a hash-locked requirements file with `pip install --require-hashes`, and turn on build provenance and an SBOM.
+- **Distributed password guessing.** Throttling is per address; many addresses can share guesses against one name. A 12-character password and scrypt make this slow, but a per-name slow-down that never blocks the owner (extra delay, not a lock) would help.
 - **Passkey-derived unlock** (WebAuthn PRF / hmac-secret): let a passkey alone unlock a profile's data, so a phone needs a password only once. Support is uneven (recent iOS and Android); the password stays as the fallback.
 - **Unattended sync** (a scheduled mail sync) cannot work while data is locked by design. Options: let a person opt in to keeping their data unlocked, or a per-profile "sync key" that can only append statements. Decide before building scheduling.
-- Keep decrypted statements out of `/tmp` entirely: parse from memory or a tmpfs the app owns, and shred after use.
-- A nonce-based Content-Security-Policy (the templates still use inline scripts and styles, so `'unsafe-inline'` is allowed today).
-- A `SECURITY.md` and a threat model; Content-Security-Policy headers; secret scanning in CI.
-- Pin the Docker base image by digest and the GitHub Actions by commit SHA; hash-locked requirements.
+- **Statements on disk.** Parse from memory instead of a temporary file (the compose files put `/tmp` in RAM, which covers Docker).
+- **A nonce-based Content-Security-Policy.** The templates still use inline scripts and styles, so `'unsafe-inline'` is allowed today.
+- Secret scanning and the phone-width overflow check in CI.
 
 ### 7.10 Engineering
 

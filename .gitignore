@@ -2,6 +2,12 @@
 data/*
 !data/.gitkeep
 .env
+.env.*
+!.env.example
+*.tgz
+*.pdf
+!samples/**/*.pdf
+!samples/*/*.pdf
 
 # Python
 __pycache__/

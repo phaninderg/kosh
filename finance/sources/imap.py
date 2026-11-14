@@ -11,7 +11,9 @@ from __future__ import annotations
 import email
 import hashlib
 import imaplib
+import ipaddress
 import re
+import socket
 import ssl
 from datetime import date, timedelta, timezone
 from email import policy
@@ -24,6 +26,19 @@ from finance.secrets import get_secret
 from finance.sources.base import MailboxError
 
 MAX_MESSAGE_BYTES = 30 * 1024 * 1024
+MAX_MULTIPART_PARTS = 40
+PROVIDER_AUTH_DOMAINS = {"gmail": ("google.com",), "yahoo": ("yahoo.com", "yahoo.net", "yahoodns.net", "aol.com")}
+
+
+def trusted_authserv(account) -> tuple[str, ...]:
+    """Domains whose Authentication-Results we believe: the provider's own, or for a custom server the domain of the mail host."""
+    if account.provider in PROVIDER_AUTH_DOMAINS:
+        return PROVIDER_AUTH_DOMAINS[account.provider]
+    return (".".join(account.imap_host.lower().split(".")[-2:]),)
+
+
+def authserv_id(header: str) -> str:
+    return header.split(";", 1)[0].strip().lower()
 _MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 _AUTH_RESULT = re.compile(r"\b(dkim|spf|dmarc)=([a-z]+)", re.I)
 
@@ -62,13 +77,17 @@ def _passes_for_sender(header: str, from_domain: str) -> bool:
     return False
 
 
-def auth_failed(headers: list, from_domain: str = "") -> bool:
+def auth_failed(headers: list, from_domain: str = "", trusted: tuple[str, ...] | None = None) -> bool:
     """Is the sender not verified as authentic? DMARC is the combined verdict (SPF or DKIM passed AND matched the
     From domain), so when it is present it decides: pass accepts a message even if DKIM alone failed (a relay that
     rewrites a message breaks the signature but not SPF), fail rejects it. Without a DMARC result any explicit failure
     of SPF or DKIM rejects, and so does the absence of a pass for the From domain: a message nobody vouched for is
     not accepted just because nobody said it was bad."""
     top = _top_header(headers)
+    if trusted is not None:                               # only a header written by the receiving server counts; anything else is unverified
+        serv = authserv_id(top)
+        if not any(serv == d or serv.endswith("." + d) for d in trusted):
+            return True
     verdicts = dict(p.split("=") for p in auth_summary(headers).split())
     dmarc = verdicts.get("dmarc")
     if dmarc in ("pass", "bestguesspass"):
@@ -139,6 +158,13 @@ def _imap_date(d: date) -> str:
 
 
 def _default_connect(host: str, port: int):
+    """Connect over verified TLS, but only to a public address: a custom host must not turn the server into a scanner for its own network."""
+    try:
+        addresses = {info[4][0] for info in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)}
+    except OSError as exc:
+        raise MailboxError(f"cannot resolve {host}") from exc
+    if not addresses or not all(ipaddress.ip_address(a).is_global for a in addresses):
+        raise MailboxError(f"{host} is not a public mail server")
     return imaplib.IMAP4_SSL(host, port, ssl_context=ssl.create_default_context(), timeout=30)   # verifies the certificate and host name
 
 
@@ -186,7 +212,11 @@ class ImapSource:
             scope = f"UID {self._last + 1}:*" if self._last else f"SINCE {since}"
             uids |= {u for u in ro.search(f'FROM "{rule.match}" {scope}') if u > self._last}
         for uid in sorted(uids):
-            yield self._load(ro, uid)
+            try:
+                yield self._load(ro, uid)
+            except Exception as exc:                      # a message that cannot be read is recorded as rejected, never retried forever
+                yield SourceMessage(uid=uid, message_id=f"uid:{self.account.name}:{self.account.folder}:{self._uidvalidity}:{uid}",
+                                    sender="", skip_reason=f"message could not be read ({type(exc).__name__})", reject=True)
 
     def commit(self, msg: SourceMessage) -> None:
         self._last = max(self._last, msg.uid)
@@ -206,7 +236,11 @@ class ImapSource:
         if ro.size(uid) > MAX_MESSAGE_BYTES:
             return SourceMessage(uid=uid, message_id=fallback_id, sender="", skip_reason="message too large",
                                  reject=True)
-        msg = email.message_from_bytes(ro.message(uid), policy=policy.default)
+        raw = ro.message(uid)
+        if raw.count(b"ultipart/") > MAX_MULTIPART_PARTS:                          # deep MIME nesting crashes the parser
+            return SourceMessage(uid=uid, message_id=fallback_id, sender="", skip_reason="message structure too complex",
+                                 reject=True)
+        msg = email.message_from_bytes(raw, policy=policy.default)
         sender = parseaddr(str(msg.get("From", "")))[1].lower()
         message_id = str(msg.get("Message-ID", "")).strip() or fallback_id
         subject = str(msg.get("Subject", ""))[:200]
@@ -219,7 +253,7 @@ class ImapSource:
             out.skip_reason = "sender not on allowlist"
             return out
         out.rule_match = rule.match
-        if self.account.require_auth and auth_failed(msg.get_all("Authentication-Results", []), sender.rsplit("@", 1)[-1]):
+        if self.account.require_auth and auth_failed(msg.get_all("Authentication-Results", []), sender.rsplit("@", 1)[-1], trusted_authserv(self.account)):
             out.skip_reason = f"sender authentication failed ({auth}) for {sender}, email dated {received or 'unknown'}"
             out.reject = True
             return out

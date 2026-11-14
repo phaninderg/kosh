@@ -1,6 +1,5 @@
 """Secrets live in the signed-in profile's vault, and only there."""
 
-import json
 
 import pytest
 

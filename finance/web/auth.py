@@ -82,7 +82,8 @@ def cookie_value(cookie_header: str, name: str) -> str:
 
 def safe_next(target: str) -> str:
     """Where to go after login: a path on this site, never another address."""
-    return target if target.startswith("/") and not target.startswith("//") and "\\" not in target else "/"
+    ok = target.startswith("/") and not target.startswith("//") and all(0x21 <= ord(c) <= 0x7E for c in target) and "\\" not in target
+    return target if ok else "/"                         # printable ASCII only: a tab or newline can turn "/\t/x" into "//x" in a browser
 
 
 # ── password work that cannot be used to burn the CPU ──────────────────────────────
@@ -111,10 +112,13 @@ async def run_limited(fn, *args):
 # ── throttling ────────────────────────────────────────────────────────────────
 
 class Throttle:
-    """Slows password guessing: five failures from one address lock it out, with the lock doubling each time up to an
-    hour; and a global cap so many addresses cannot share the guessing. A correct login resets the address."""
+    """Slows password guessing: five failures from one key lock it out, with the lock doubling each time up to an hour.
+    An attempt is counted *before* the slow password check (`reserve`) and forgiven on success, so a burst of parallel
+    guesses cannot all slip through. The key is the client's address, or for someone already signed in, their own profile,
+    so a stranger can never lock a signed-in person out. There is deliberately no global lock: it would let anyone block
+    everybody."""
 
-    PER_CLIENT, GLOBAL_PER_HOUR = 5, 30
+    PER_CLIENT = 5
 
     def __init__(self, clock=time.time):
         self._clock = clock
@@ -130,15 +134,18 @@ class Throttle:
 
     def retry_after(self, client: str) -> int:
         """Seconds to wait, 0 when an attempt is allowed."""
-        now = self._clock()
-        wait = max(self._locked_until.get(client, 0) - now, 0)
-        if len(self._recent("*", 3600)) >= self.GLOBAL_PER_HOUR:
-            wait = max(wait, 3600 - (now - min(self._fails["*"])))
+        wait = max(self._locked_until.get(client, 0) - self._clock(), 0)
         return int(wait) + (1 if wait else 0)
+
+    def reserve(self, client: str) -> int:
+        """Allow an attempt (returning 0) and count it as a failure until `succeeded` says otherwise; or return the seconds to wait."""
+        wait = self.retry_after(client)
+        if not wait:
+            self.failed(client)
+        return wait
 
     def failed(self, client: str) -> None:
         now = self._clock()
-        self._fails.setdefault("*", []).append(now)
         recent = self._recent(client, 900)
         recent.append(now)
         if len(recent) >= self.PER_CLIENT:

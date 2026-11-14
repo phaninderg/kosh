@@ -1,5 +1,4 @@
 casparser==1.4.1
-cbor2==6.3.0
 cryptography==50.0.2
 fastapi==0.162.5
 Jinja2==3.1.6

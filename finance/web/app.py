@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import tempfile
+import threading
 import time
 from types import SimpleNamespace
 from datetime import date
@@ -14,14 +15,14 @@ from urllib.parse import urlencode, urlparse
 
 from markupsafe import Markup
 from fastapi import FastAPI, File, Form, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from config import ALLOWED_HOSTS, PUBLIC_PORT, UI_HOST, UI_PORT
 from finance import analytics
 from finance.db import connect_ro
-from finance.jobs import ACTION_INFO, JobManager
+from finance.jobs import JobManager
 from finance import users as users_mod, vault
 from finance.web import accounts, auth as auth_mod, pwa
 
@@ -54,6 +55,10 @@ def ts(value) -> Markup:
     return Markup('<time class="ts" datetime="{}">{} UTC</time>').format(iso, str(value))
 
 
+MAX_FORM_BYTES = 64 * 1024                       # every form and JSON body except a statement upload
+MAX_FILE_BYTES = 25 * 1024 * 1024                 # one statement PDF (real ones are well under 10 MB)
+MAX_UPLOAD_BYTES = 200 * 1024 * 1024              # a whole upload (up to 25 files)
+MAX_IN_FLIGHT = 6                                 # simultaneous requests per profile
 CSP = ("default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
        "connect-src 'self'; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 ANONYMOUS_PATHS = {"/manifest.webmanifest", "/sw.js"}          # fetched by the browser without cookies; contain nothing private
@@ -72,9 +77,10 @@ def create_app(db_path: str = vault.VAULT_DB, jobs: JobManager | None = None, ma
     jobs = jobs or JobManager()
     users, registry = users or users_mod.Users(), registry or vault.Registry()
     throttle, challenges = auth_mod.Throttle(), accounts.Challenges()
-    allowed_hosts = {f"{h}:{p}" for h in (UI_HOST, "localhost", "127.0.0.1") for p in (UI_PORT, PUBLIC_PORT)} | {"testserver"}
+    allowed_hosts = {f"{h}:{p}" for h in (UI_HOST, "localhost", "127.0.0.1") for p in (UI_PORT, PUBLIC_PORT)}
     allowed_hosts |= set(ALLOWED_HOSTS if extra_hosts is None else extra_hosts)       # the domain a hosted instance answers to
     pwa.register(app)
+    in_flight: dict[str, threading.BoundedSemaphore] = {}              # requests running at once, per profile
 
     app.mount("/static", StaticFiles(directory=str(HERE / "static")), name="static")
 
@@ -98,6 +104,11 @@ def create_app(db_path: str = vault.VAULT_DB, jobs: JobManager | None = None, ma
             origin = request.headers.get("origin") or request.headers.get("referer")
             if not origin or urlparse(origin).netloc.lower() != request.headers["host"].lower():   # a browser always sends one
                 return PlainTextResponse("bad origin", status_code=403)
+            size = request.headers.get("content-length", "")           # refuse oversized bodies before anything reads them
+            if not size.isdigit():
+                return PlainTextResponse("a request body with a length is required", status_code=411)
+            if int(size) > (MAX_UPLOAD_BYTES if path == "/import" else MAX_FORM_BYTES):
+                return PlainTextResponse("request too large", status_code=413)
         if path in ANONYMOUS_PATHS or path.startswith("/static/"):
             return await call_next(request)
         session = auth_mod.read_session(auth_mod.cookie_value(request.headers.get("cookie", ""),
@@ -121,11 +132,23 @@ def create_app(db_path: str = vault.VAULT_DB, jobs: JobManager | None = None, ma
             if request.method == "GET" and "text/html" in request.headers.get("accept", ""):
                 return RedirectResponse(f"/unlock?{urlencode({'next': path})}", status_code=303)
             return PlainTextResponse("data is locked: unlock it with your password", status_code=423)
+        slot = in_flight.setdefault(user["id"], threading.BoundedSemaphore(MAX_IN_FLIGHT))
+        if not slot.acquire(blocking=False):                             # one profile cannot occupy every worker thread
+            return PlainTextResponse("too many requests at once for your profile; try again in a moment", status_code=429)
         token = vault.current_vault.set(unlocked)                        # from here on, "the database" means this person's
         try:
             return await call_next(request)
         finally:
             vault.current_vault.reset(token)
+            slot.release()
+
+    @app.exception_handler(vault.VaultBusy)
+    async def vault_busy(request: Request, exc: Exception):
+        return PlainTextResponse("Your data is busy (a mail sync or import is writing). Wait a moment and try again.", status_code=503)
+
+    @app.exception_handler(vault.VaultLocked)
+    async def vault_locked(request: Request, exc: Exception):
+        return PlainTextResponse("Your data is locked. Sign in again.", status_code=423)
 
     @app.middleware("http")
     async def guard(request: Request, call_next):
@@ -268,9 +291,9 @@ def create_app(db_path: str = vault.VAULT_DB, jobs: JobManager | None = None, ma
             """One file: unlock it the way mailbox sync does (a typed password first, then the Identity templates from
             your sender rules and your default password), then import it. Passwords stay in memory; nothing is stored or echoed."""
             out = {"name": upload.filename or "statement.pdf", "result": None, "used": None, "error": None}
-            data = upload.file.read(50 * 1024 * 1024 + 1)
-            if len(data) > 50 * 1024 * 1024 or not data.startswith(b"%PDF"):
-                out["error"] = "Not a PDF (or larger than 50 MB)."
+            data = upload.file.read(MAX_FILE_BYTES + 1)
+            if len(data) > MAX_FILE_BYTES or not data.startswith(b"%PDF"):
+                out["error"] = "Not a PDF (or larger than 25 MB)."
                 return out
             try:
                 unlocked = DecryptAgent(Identity()).unlock(data, "upload", templates, priority=typed)
@@ -358,7 +381,6 @@ def create_app(db_path: str = vault.VAULT_DB, jobs: JobManager | None = None, ma
     from finance import secrets as secret_store
     from finance.mailconfig import (MailboxAccount, default_cas_rules, format_sender_lines, load_config,
                                     parse_sender_lines, save_config)
-    from finance.passwords import validate_template
 
     def mailboxes_ctx(request: Request, *, edit: str = "", flash: str = "", error: str = "", form: dict | None = None):
         cfg = load_config(mail_config_path)
@@ -399,9 +421,13 @@ def create_app(db_path: str = vault.VAULT_DB, jobs: JobManager | None = None, ma
             if not acct.senders:
                 raise ValueError("add at least one allowed sender")
             cfg = load_config(mail_config_path)
+            previous = cfg.account(acct.name)
             cfg.accounts = [a for a in cfg.accounts if a.name != acct.name] + [acct]
             if app_password:
                 secret_store.set_secret(acct.secret_key, app_password.strip())
+            elif previous and not acct.same_server(previous):
+                secret_store.delete_secret(acct.secret_key)               # a saved password never follows a changed server or username
+                raise ValueError("you changed the server or username, so enter the app password again")
             elif not secret_store.has_secret(acct.secret_key):
                 raise ValueError("enter the app password (it is sealed in your own vault, never shown again)")
             save_config(cfg, mail_config_path)
@@ -535,7 +561,7 @@ def create_app(db_path: str = vault.VAULT_DB, jobs: JobManager | None = None, ma
             n = ledger.remove_duplicate_transactions()
         finally:
             ledger.close()
-        return _review_page(request, f"Removed {n} duplicate transaction(s). Backup saved as {Path(backup).name} in data/backups.")
+        return _review_page(request, f"Removed {n} duplicate transaction(s). A sealed backup of your ledger was saved first.")
 
     @app.post("/review/merge-all-duplicates", response_class=HTMLResponse)
     def review_merge_all(request: Request):
@@ -547,7 +573,7 @@ def create_app(db_path: str = vault.VAULT_DB, jobs: JobManager | None = None, ma
         finally:
             ledger.close()
         return _review_page(request, f"Merged {res['merged']} folio pair(s): {res['moved']} transaction(s) moved, "
-                                     f"{res['dropped']} duplicate(s) dropped. Backup saved as {Path(backup).name} in data/backups.")
+                                     f"{res['dropped']} duplicate(s) dropped. A sealed backup of your ledger was saved first.")
 
     @app.post("/review/{item_id}/duplicate/{decision}", response_class=HTMLResponse)
     def review_duplicate(request: Request, item_id: int, decision: str):
@@ -570,7 +596,7 @@ def create_app(db_path: str = vault.VAULT_DB, jobs: JobManager | None = None, ma
                 backup = ledger.backup()                     # always snapshot before changing data
                 res = ledger.merge_accounts(int(pa), int(pb))
                 note = (f"Merged: {res['moved']} transaction(s) moved, {res['dropped']} duplicate(s) dropped. "
-                        f"Backup saved as {Path(backup).name} in data/backups.")
+                        f"A sealed backup of your ledger was saved first.")
         except ValueError as exc:
             note = f"Could not merge: {exc}"
         finally:

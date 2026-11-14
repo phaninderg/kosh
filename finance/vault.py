@@ -52,6 +52,10 @@ class VaultLocked(VaultError):
     """No unlocked profile in this context."""
 
 
+class VaultClosed(VaultLocked):
+    """This Vault object was locked (or its profile removed) and must not be used again."""
+
+
 class VaultBusy(VaultError):
     """The profile's ledger is being written by something else (for example a running sync)."""
 
@@ -139,6 +143,17 @@ def rotate_recovery(uid: str, record: dict, dek: bytes) -> tuple[dict, str]:
 
 # ── the encrypted database ───────────────────────────────────────────────────────
 
+_WRITE_LOCKS: dict[str, threading.Lock] = {}
+_WRITE_LOCKS_GUARD = threading.Lock()
+
+
+def _write_lock_for(uid: str) -> threading.Lock:
+    """One write lock per profile for the life of the process, shared by every Vault object made for it, so locking and
+    unlocking again can never produce two writers."""
+    with _WRITE_LOCKS_GUARD:
+        return _WRITE_LOCKS.setdefault(uid, threading.Lock())
+
+
 class _WriteToken:
     """Holds the ledger's write lock for one connection and gives it back exactly once, even if the connection is
     garbage-collected without close()."""
@@ -186,18 +201,30 @@ class VaultConnection(sqlite3.Connection):
 class Vault:
     """One unlocked profile: its data key and the files sealed under it."""
 
-    WRITE_WAIT = 60                                    # seconds a writer waits for another writer before giving up
+    WRITE_WAIT = 3                                     # seconds a writer waits for another writer (a sync) before saying "busy"
 
     def __init__(self, uid: str, dek: bytes, root: Path | None = None):
         self.uid, self._dek = uid, dek
         self.root = Path(root) if root else USERS_DIR / uid
         self._lock = threading.RLock()
-        self._write_lock = threading.Lock()
+        self._write_lock = _write_lock_for(uid)
+        self._closed = False
         self._master: bytes | None = None
         self._loaded = False
         self.last_used = time.time()
 
+    def close(self) -> None:
+        """Lock this vault for good: forget the key and refuse every later read, write or commit, including from a job that is
+        still running. Unlocking again makes a new Vault."""
+        with self._lock:
+            self._closed, self._dek, self._master = True, None, None
+
+    def _check(self) -> None:
+        if self._closed:
+            raise VaultClosed("this profile was locked")
+
     def hash_key(self) -> bytes:
+        self._check()
         return hmac.new(self._dek, b"kosh-account-hash-key", hashlib.sha256).digest()
 
     # sealed files ------------------------------------------------------------
@@ -208,6 +235,7 @@ class Vault:
 
     def put(self, name: str, data: bytes) -> None:
         with self._lock:
+            self._check()
             path = self._path(name)
             path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             header = json.dumps({"name": name}).encode()
@@ -215,6 +243,7 @@ class Vault:
 
     def get(self, name: str) -> bytes | None:
         with self._lock:
+            self._check()
             try:
                 blob = self._path(name).read_bytes()
             except OSError:
@@ -226,11 +255,13 @@ class Vault:
 
     def delete(self, name: str) -> None:
         with self._lock:
+            self._check()
             self._path(name).unlink(missing_ok=True)
 
     def names(self, prefix: str = "") -> list[str]:
         out = []
         with self._lock:
+            self._check()
             for p in sorted((self.root / "f").glob("*.enc")):
                 try:
                     name = _split(unseal(self._dek, p.read_bytes(), aad=b"file"))[0]
@@ -258,6 +289,7 @@ class Vault:
 
     def connect(self, writable: bool) -> VaultConnection:
         """A private in-memory copy of the ledger. A writer holds the write lock until it closes."""
+        self._check()
         self.last_used = time.time()
         if writable and not self._write_lock.acquire(timeout=self.WRITE_WAIT):
             raise VaultBusy("the ledger is busy (a sync or import is writing); try again in a moment")
@@ -282,6 +314,7 @@ class Vault:
     def _persist(self, conn: VaultConnection) -> None:
         data = sqlite3.Connection.serialize(conn)
         with self._lock:
+            self._check()                                  # a job still running after a lock, disable or delete cannot write
             if data != self._master:
                 self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
                 _atomic_write(self._db_file, seal(self._dek, data, aad=b"ledger"))
@@ -290,6 +323,7 @@ class Vault:
 
     def open_snapshot(self, path: Path) -> sqlite3.Connection:
         """A snapshot made by snapshot(), opened in memory (to inspect or restore it)."""
+        self._check()
         conn = sqlite3.connect(":memory:")
         conn.deserialize(unseal(self._dek, Path(path).read_bytes(), aad=b"ledger"))
         conn.row_factory = sqlite3.Row
@@ -298,6 +332,7 @@ class Vault:
     def snapshot(self, directory: Path | None = None) -> Path:
         """A timestamped copy of the sealed ledger (already encrypted, so it is safe to store anywhere)."""
         with self._lock:
+            self._check()
             directory = Path(directory) if directory else self.root / "backups"
             directory.mkdir(parents=True, exist_ok=True, mode=0o700)
             dest = directory / f"ledger-{time.strftime('%Y%m%d-%H%M%S')}.enc"
@@ -314,13 +349,16 @@ def _split(payload: bytes) -> tuple[str, bytes]:
 
 def _atomic_write(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")      # never shared between writers
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "wb") as f:
-        f.write(data)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 # ── who is unlocked right now ────────────────────────────────────────────────────
@@ -358,6 +396,7 @@ class Registry:
             v = self._vaults.get(uid)
             if v and self._clock() - v.last_used > self.idle:
                 del self._vaults[uid]                       # locked by inactivity
+                v.close()
                 return None
             if v:
                 v.last_used = self._clock()
@@ -365,7 +404,9 @@ class Registry:
 
     def lock(self, uid: str) -> None:
         with self._lock:
-            self._vaults.pop(uid, None)
+            v = self._vaults.pop(uid, None)
+        if v:
+            v.close()
 
     def unlocked(self, uid: str) -> bool:
         return self.get(uid) is not None

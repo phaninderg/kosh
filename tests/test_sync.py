@@ -1,4 +1,3 @@
-import sqlite3
 from datetime import date
 
 import pytest
@@ -128,20 +127,20 @@ def test_allowlist_is_strict_and_spoofs_are_ignored(db_path, seen_passwords):
 
 
 def test_failed_sender_authentication_is_rejected_and_flagged(db_path, seen_passwords):
-    msgs = {1: make_email(pdf=make_pdf("s3cret!"), auth="mx; dkim=fail spf=pass")}
+    msgs = {1: make_email(pdf=make_pdf("s3cret!"), auth="mx.google.com; dkim=fail spf=pass")}
     s = runner(db_path, msgs).run().accounts[0]
     assert (s.rejected, s.imported) == (1, 0)
     assert [i["kind"] for i in analytics.open_review_items(connect_ro(db_path))] == ["rejected_mail"]
 
 
 @pytest.mark.parametrize("auth, rejected", [
-    ("mx; dkim=fail spf=pass dmarc=pass", False),     # DMARC passed: SPF aligned, so the sender is verified
-    ("mx; dkim=pass spf=pass dmarc=fail", True),       # DMARC failed: not the domain's own mail, whatever else passed
-    ("mx; dkim=fail spf=pass", True),                  # no DMARC result: any explicit failure still rejects
-    ("mx; dkim=pass spf=fail", True),
-    ("mx; dkim=pass spf=pass dmarc=pass", False),
-    ("mx; dkim=fail spf=fail dmarc=bestguesspass", False),
-    ("mx; dkim=none spf=pass dmarc=none", False),
+    ("mx.google.com; dkim=fail spf=pass dmarc=pass", False),     # DMARC passed: SPF aligned, so the sender is verified
+    ("mx.google.com; dkim=pass spf=pass dmarc=fail", True),       # DMARC failed: not the domain's own mail, whatever else passed
+    ("mx.google.com; dkim=fail spf=pass", True),                  # no DMARC result: any explicit failure still rejects
+    ("mx.google.com; dkim=pass spf=fail", True),
+    ("mx.google.com; dkim=pass spf=pass dmarc=pass", False),
+    ("mx.google.com; dkim=fail spf=fail dmarc=bestguesspass", False),
+    ("mx.google.com; dkim=none spf=pass dmarc=none", False),
 ])
 def test_dmarc_decides_when_present_else_any_explicit_failure_rejects(db_path, seen_passwords, auth, rejected):
     s = runner(db_path, {1: make_email(pdf=make_pdf("s3cret!"), auth=auth)}).run().accounts[0]
@@ -269,7 +268,7 @@ def test_remembered_password_unlocks_future_statements_automatically(db_path, se
     inbox, ids = _queue_two_custom(db_path, tmp_path)
     r = runner(db_path, {}, identity=IDENT, inbox=inbox)
     assert r.retry(ids[0], password="custom-A", remember=True) == "imported"
-    assert "custom-A" in secrets.get_secret("id:extra_passwords")           # in the keyring, nowhere else
+    assert "custom-A" in secrets.get_secret("id:extra_passwords")           # in the vault, nowhere else
     assert r.retry(ids[1]) == "imported"                                    # second doc: no typing needed
     new = runner(db_path, {5: make_email(pdf=make_pdf("custom-A"))}, identity=IDENT, inbox=inbox).run().accounts[0]
     assert new.imported == 1 and new.attention == 0                         # and so is a brand-new email
@@ -304,6 +303,55 @@ def test_the_imap_connection_verifies_the_servers_certificate(monkeypatch):
     from finance.sources import imap
     seen = {}
     monkeypatch.setattr(imap.imaplib, "IMAP4_SSL", lambda host, port, **kw: seen.update(kw))
+    monkeypatch.setattr(imap.socket, "getaddrinfo", lambda *a, **k: [(2, 1, 6, "", ("93.184.216.34", 993))])
     imap._default_connect("imap.example", 993)
     ctx = seen["ssl_context"]
     assert ctx.verify_mode == ssl.CERT_REQUIRED and ctx.check_hostname
+
+
+# ── hostile mail and unsafe servers ───────────────────────────────────────────────────
+
+def _nested(depth: int) -> bytes:
+    """A message from an allowed, authenticated sender whose MIME parts are nested `depth` deep."""
+    head = (b"From: donotreply@camsonline.com\r\nSubject: x\r\nAuthentication-Results: mx.google.com; dmarc=pass\r\n"
+            b"Content-Type: multipart/mixed; boundary=a\r\n\r\n")
+    return head + b"--a\r\nContent-Type: multipart/mixed; boundary=a\r\n\r\n" * depth
+
+
+def test_hostile_mail_is_rejected_once_and_never_blocks_the_mailbox(db_path, seen_passwords):
+    from tests.mailfix import make_email
+    msgs = {1: _nested(60), 2: _nested(3000), 3: make_email(pdf=make_pdf("s3cret!"))}      # too complex; crashes the parser; fine
+    (acct,) = runner(db_path, msgs).run().accounts
+    assert acct.rejected == 2 and acct.imported == 1 and not acct.error                    # the good message still came through
+    assert runner(db_path, msgs).run().accounts[0].messages == 0                           # and the bad ones are never fetched again
+
+
+def test_an_attachment_that_breaks_the_pdf_reader_is_queued_not_fatal(db_path, monkeypatch):
+    from finance import passwords
+    monkeypatch.setattr(passwords.DecryptAgent, "unlock", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    out = runner(db_path, {1: make_email(pdf=make_pdf("s3cret!"))}).run()
+    assert out.accounts[0].attention == 1 and not out.accounts[0].error
+
+
+@pytest.mark.parametrize("provider, host, serv, rejected", [
+    ("gmail", None, "mx.google.com", False), ("gmail", None, "attacker.example", True), ("gmail", None, "", True),
+    ("gmail", None, "mx.google.com.evil.example", True), ("yahoo", None, "mta1.mail.yahoo.com", False),
+    ("custom", "imap.mybank-mail.example", "mx.mybank-mail.example", False), ("custom", "imap.mybank-mail.example", "mx.other.example", True),
+])
+def test_only_the_receiving_servers_own_authentication_header_is_believed(provider, host, serv, rejected):
+    from finance.mailconfig import MailboxAccount
+    from finance.sources.imap import auth_failed, trusted_authserv
+    acct = MailboxAccount(name="m", provider=provider, username="u@x.invalid", host=host)
+    header = f"{serv}; dmarc=pass header.from=camsonline.com"
+    assert auth_failed([header], "camsonline.com", trusted_authserv(acct)) is rejected
+
+
+@pytest.mark.parametrize("host, addresses", [("localhost", ["127.0.0.1"]), ("internal.corp", ["10.1.2.3"]), ("metadata", ["169.254.169.254"]),
+                                             ("mixed", ["93.184.216.34", "192.168.0.5"]), ("v6", ["::1"])])
+def test_imap_will_not_connect_to_private_or_internal_addresses(monkeypatch, host, addresses):
+    import socket
+    from finance.sources import imap
+    from finance.sources.base import MailboxError
+    monkeypatch.setattr(imap.socket, "getaddrinfo", lambda *a, **k: [(socket.AF_INET, 1, 6, "", (a, 993)) for a in addresses])
+    with pytest.raises(MailboxError, match="not a public mail server"):
+        imap._default_connect(host, 993)

@@ -10,6 +10,13 @@ services:
     volumes:
       - kosh-data:/app/data
     restart: unless-stopped
+    read_only: true                       # the container's own files cannot be changed; only the data volume and /tmp are writable
+    tmpfs:
+      - /tmp:size=512m,mode=1777          # statements are parsed from here, in memory, never on the disk layer
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 1536m                      # a hostile PDF cannot take the whole machine
+    pids_limit: 256
 
 volumes:
   kosh-data:

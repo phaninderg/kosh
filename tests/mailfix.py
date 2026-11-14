@@ -22,7 +22,7 @@ def make_pdf(password: str | None = None) -> bytes:
 
 
 def make_email(*, sender="donotreply@camsonline.com", pdf: bytes | None = None, filename="statement.pdf",
-               msgid=None, auth="mx.example; spf=pass dkim=pass", subject="Your statement",
+               msgid=None, auth="mx.google.com; spf=pass dkim=pass", subject="Your statement",
                date="Mon, 02 Jun 2025 10:00:00 +0530") -> bytes:
     m = EmailMessage()
     m["From"] = f"Statements <{sender}>"

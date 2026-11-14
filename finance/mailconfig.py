@@ -80,10 +80,14 @@ class MailboxAccount(BaseModel):
 
     @property
     def imap_host(self) -> str:
-        host = self.host or PROVIDERS.get(self.provider)
+        host = (self.host if self.provider == "custom" else None) or PROVIDERS.get(self.provider)   # gmail/yahoo always mean their own servers
         if not host:
             raise ValueError("custom provider needs a host")
         return host
+
+    def same_server(self, other: "MailboxAccount | None") -> bool:
+        """Would a password saved for `other` be sent to the same place and account as for this one?"""
+        return bool(other) and (other.imap_host, other.port, other.username.lower()) == (self.imap_host, self.port, self.username.lower())
 
     @property
     def secret_key(self) -> str:

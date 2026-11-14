@@ -1,7 +1,7 @@
 """Sync runner (phase 2): Mailbox -> Decrypt -> Parser -> Ledger, one account at a time.
 
 A failure to unlock or parse a document never stops the run: it goes to the needs-attention
-queue (the encrypted PDF is kept in data/inbox so it can be retried after fixing templates or
+queue (the locked PDF is kept, sealed in the profile's vault, so it can be retried after fixing templates or
 secrets). A failure of one mailbox never stops the others. The full Orchestrator (retries,
 scheduling) arrives in phase 5 and will drive this same logic.
 """
@@ -151,7 +151,10 @@ class SyncRunner:
                 s.duplicate += 1
             return "known"
 
-        unlocked = decrypt.unlock(doc.data, doc.sender, rule.templates, priority=priority)
+        try:
+            unlocked = decrypt.unlock(doc.data, doc.sender, rule.templates, priority=priority)
+        except Exception as exc:                                # a damaged or hostile PDF must not stop the sync
+            return self._attention(ledger, doc, rule, f"the file could not be opened ({type(exc).__name__})", s)
         if not unlocked.ok:
             return self._attention(ledger, doc, rule, unlocked.reason, s)
 

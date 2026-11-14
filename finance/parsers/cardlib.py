@@ -14,7 +14,6 @@ from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal
 
 from finance.models import AccountTxn, ParsedAccount, ParsedAccountStatement
-from finance.parsers.pdftext import Word
 from finance.redact import redact
 
 # ₹ is printed as a backtick (ICICI), a real rupee sign, or the letter C (HDFC); a sign may also lead the number.
@@ -80,10 +79,6 @@ def rupee_rounded(printed: Decimal, exact: Decimal, warnings: list[str]) -> Deci
         warnings.append("The printed total is rounded to a whole rupee; the exact figure was worked out from the summary.")
         return exact
     return printed
-
-
-def in_region(w: Word, lo: float, hi: float) -> bool:
-    return lo <= w.x0 < hi
 
 
 def build_statement(*, parser: str, institution: str, identifier: str, previous_due: Decimal, total_due: Decimal,

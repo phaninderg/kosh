@@ -19,16 +19,16 @@ PPF = "XXXXXXXX5678"
 
 def savings_rows():
     return [
-        row("01-10-2026", "-9000", head=["ACH/BD-SIPCO/ICIC700/TKO"], tail=["T8337919"]),
+        row("01-10-2026", "-9000", head=["ACH/EXAMPLE-SIP/ICIC700/TKO"], tail=["T0000001"]),
         # two rows whose wrapped lines sit exactly midway: nearest-line assignment would give the second
         # row's first header line to the first row
-        row("05-10-2026", "200000", mode="NET BANKING", head=["ACME TRADERS LIMITED"], tail=["INF/INFT/046141613811/goods"]),
-        row("05-10-2026", "-22000", head=["CRED Club", "UPI/CRED Club/XXclub@axisb/payment on/AXIS"],
-            tail=["BANK/664414543345/ACDcb0c287186c341889dcd580f632ca", "8e3"]),
-        row("07-10-2026", "-500", head=["ACH/PPFAS 07102026"], own="CAMS/ICIC700/5914812162552 11106293", tail=["TAILMARK"]),
+        row("05-10-2026", "200000", mode="NET BANKING", head=["ACME TRADERS LIMITED"], tail=["INF/INFT/000000000001/goods"]),
+        row("05-10-2026", "-22000", head=["CRED Club", "UPI/CRED Club/example@bank/payment on/AXIS"],
+            tail=["BANK/000000000002/ACD0123456789abcdef0123456789abc", "8e3"]),
+        row("07-10-2026", "-500", head=["ACH/PPFAS 07102026"], own="CAMS/ICIC700/1000000000001 20000001", tail=["TAILMARK"]),
         row("15-10-2026", "-5000", own="TO PPF 004000000000_SR123456789"),
         row("19-10-2026", "10568.01", mode="CMS TXN", glue=True, own="CMS/ 10H REFUND/BANK CREDIT CARD WITHDR"),
-        row("24-10-2026", "50000", head=["A PAYER"], tail=["BANK/245617959646/AXLbe18d"]),
+        row("24-10-2026", "50000", head=["A PAYER"], tail=["BANK/000000000003/AXL000aa"]),
     ]
 
 
@@ -80,9 +80,9 @@ def test_references_extracted_and_long_numbers_masked(tmp_path):
     sav = next(a for a in parse(statement_pdf(), tmp_path).accounts if a.type == "bank")
     by_amount = {t.amount: t for t in sav.txns}
     assert by_amount[Decimal("-5000")].reference == "SR123456789"
-    assert by_amount[Decimal("-22000")].reference == "664414543345"                           # UPI reference
+    assert by_amount[Decimal("-22000")].reference == "000000000002"                           # UPI reference
     assert "004000000000" not in by_amount[Decimal("-5000")].description                      # own account number masked
-    assert "664414543345" not in by_amount[Decimal("-22000")].description
+    assert "000000000002" not in by_amount[Decimal("-22000")].description
 
 
 def test_fixed_deposit_and_linked_account(tmp_path):
@@ -321,7 +321,7 @@ def test_two_card_payments_for_one_debit_are_ambiguous(db_path, tmp_path):
 
 def _sync(db_path, tmp_path, pdf, monkeypatch):
     from tests.mailfix import make_email
-    from tests.test_sync import APP_PW, IDENT, account, runner
+    from tests.test_sync import APP_PW, account, runner
     from finance.mailconfig import SenderRule
     monkeypatch.setattr("finance.sources.imap.get_secret", lambda key: APP_PW)
     acct = account(senders=[SenderRule(match="icici.example", parser="icici", templates=["{name4}{ddmm}"])])

@@ -104,7 +104,7 @@ def test_card4_remembered_endings_come_from_identity():
     assert Identity({**ID, "card4": "1234, 5678 junk 99"}).card4_values() == ["1234", "5678"]
 
 
-def test_a_found_card_ending_is_remembered_in_the_keyring():
+def test_a_found_card_ending_is_remembered_in_the_vault():
     Identity().remember_card4("4321"); Identity().remember_card4("4321"); Identity().remember_card4("0042")
     assert Identity().card4_values() == ["4321", "0042"]
 

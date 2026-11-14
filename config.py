@@ -9,8 +9,6 @@ try:
 except ImportError:
     pass
 
-_ROOT = Path(__file__).parent
-
 # Everything a person stores lives under data/ (never committed): data/users.json lists the profiles, and each profile's
 # ledger, secrets, mailbox settings, statements and logs are sealed under its own key in data/users/<id>/.
 

@@ -44,7 +44,7 @@ def client(db_path, tmp_path, monkeypatch, users, registry, me):
                         lambda path, password: CasParser().from_casdata(make_cas()), raising=False)
     jobs = FakeJobs()
     c = TestClient(webapp.create_app(db_path, jobs, imap_connect=lambda h, p: FakeImap({1: make_email(pdf=make_pdf())}),
-                                     users=users, registry=registry),
+                                     users=users, registry=registry, extra_hosts=["testserver"]),
                    base_url="http://testserver", follow_redirects=False,
                    headers={"origin": "http://testserver"})
     c.jobs, c.cfg_path, c.me, c.users, c.registry = jobs, VaultFile(), me, users, registry
@@ -212,7 +212,7 @@ def test_mailboxes_page_works_on_a_phase1_database(tmp_path, monkeypatch, users,
     from finance import db
     path = str(tmp_path / "p1.db")
     raw = sqlite3.connect(path); raw.executescript(db.SCHEMA); raw.execute("PRAGMA user_version = 1"); raw.commit(); raw.close()
-    c = TestClient(webapp.create_app(path, FakeJobs(), users=users, registry=registry),
+    c = TestClient(webapp.create_app(path, FakeJobs(), users=users, registry=registry, extra_hosts=["testserver"]),
                    base_url="http://testserver", follow_redirects=False, headers={"origin": "http://testserver"})
     c.me, c.users = me, users
     authed(c)

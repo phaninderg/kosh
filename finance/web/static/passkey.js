@@ -29,7 +29,8 @@
     const {cid, options} = await post('/auth/passkey/login/options');
     const cred = await navigator.credentials.get({publicKey: request(options)});
     const r = await post('/auth/passkey/login/verify', {cid, credential: authJSON(cred)});
-    location.href = r.next === '/unlock' ? '/unlock?next=' + encodeURIComponent(next || '/') : (next || '/');
+    const here = p => { try { const u = new URL(p || '/', location.origin); return u.origin === location.origin ? u.pathname + u.search : '/'; } catch (e) { return '/'; } };
+    location.href = r.next === '/unlock' ? '/unlock?next=' + encodeURIComponent(here(next)) : here(next);
   }
 
   if (!window.PublicKeyCredential) return;                       // no passkey support: the buttons stay hidden

@@ -86,6 +86,11 @@ class JobManager:
         except Exception as exc:                        # the log says what happened; the server keeps running
             job.log(f"{type(exc).__name__}: {str(exc)[:300]}"); code = 1
         job.meta.update(finished=time.time(), exit_code=code)
+        with self._lock:                                 # keep only the latest few finished jobs of this profile in memory
+            mine = sorted((j for j in self._jobs.values() if j.meta["uid"] == job.meta["uid"] and j.meta["finished"]),
+                          key=lambda j: j.meta["finished"])
+            for old in mine[:-KEEP]:
+                self._jobs.pop(old.meta["id"], None)
         try:
             v.put(f"jobs/{job.meta['id']}", json.dumps({"meta": job.meta, "log": "\n".join(job.lines)}).encode())
             for old in v.names("jobs/")[:-KEEP]:

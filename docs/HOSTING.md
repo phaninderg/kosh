@@ -25,7 +25,7 @@ server means putting that on a machine on the internet. Choose the safest access
   unlocks your data. After a server restart (or 8 idle hours) you enter your password once to unlock it.
 - **A forgotten password is recoverable** with the recovery key you saved at sign-up. Lose both and the data is gone for good
   (that is what "encrypted for you alone" means).
-- Five wrong guesses lock an address out for a growing time; sessions last 30 days and end when you change your password, press
+- Five wrong guesses lock that address out for a growing time (a signed-in person's own unlock and password change are limited per profile, so a stranger can never lock you out); sessions last 30 days and end when you change your password, press
   **Sign out everywhere**, or are disabled. Cookies are HttpOnly, SameSite=Strict, and on HTTPS Secure with the `__Host-` prefix.
   Every page is `no-store`; the installed app caches only its stylesheet, scripts and icons, never your figures.
 - The Account page lists your recent sign-ins and failures (and the admin sees everyone's, never anyone's money).
@@ -39,8 +39,8 @@ The full list of protections and limits is in [SECURITY.md](../SECURITY.md).
   allow only SSH keys, and prefer a short idle timeout (`KOSH_IDLE_LOCK_HOURS`).
 - A mailbox app password inside a profile is a credential an attacker with your unlocked profile could use. Use a revocable
   one, or skip mailbox sync and upload statements by hand.
-- A statement is briefly written as a temporary file while it is read. Use a server whose `/tmp` is memory-backed (the Docker
-  image does not guarantee it) if that matters to you.
+- A statement is briefly written to `/tmp` while it is read. The compose files and the command below mount `/tmp` in memory
+  (`tmpfs`), so it never reaches the disk, and run the container read-only with a memory limit.
 
 ## Option A: Tailscale (no public exposure)
 
@@ -48,6 +48,7 @@ The full list of protections and limits is in [SECURITY.md](../SECURITY.md).
 # on the server, with Docker and Tailscale installed and `tailscale up` done
 docker run -d --name kosh --restart unless-stopped \
   -e KOSH_TRUST_PROXY=1 -e KOSH_ALLOWED_HOSTS=myserver.tailnet-name.ts.net \
+  --read-only --tmpfs /tmp:size=512m --cap-drop ALL --security-opt no-new-privileges --memory 1536m --pids-limit 256 \
   -p 127.0.0.1:8765:8765 -v kosh-data:/app/data ghcr.io/phaninderg/kosh:latest
 docker logs kosh                                          # shows the one-time setup code
 tailscale serve --bg --https=443 http://127.0.0.1:8765   # HTTPS on your tailnet, with a real certificate

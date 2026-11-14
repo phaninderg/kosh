@@ -6,7 +6,6 @@ from datetime import date
 from decimal import Decimal
 
 from finance import analytics
-from finance.db import connect_ro
 from finance.ledger import Ledger
 from finance.models import ParsedFolio, ParsedScheme, ParsedStatement
 from tests.test_web import authed, client  # noqa: F401  (fixtures)

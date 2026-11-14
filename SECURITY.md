@@ -61,8 +61,11 @@ days, not hours, and no bounty.
   from the last ten minutes; another device can add one with a one-time, ten-minute, single-use code.
 - **Password** (12+ characters), checked by unwrapping the key (a wrong password fails the GCM tag), off the event loop, two at a
   time. A forgotten password is reset with the **recovery key**, which is then replaced.
-- **Throttling:** five wrong guesses from an address lock it out, doubling up to an hour; IPv6 counts as its /64; a global cap of
-  30 failures an hour. Unknown names cost the same work as wrong passwords.
+- **Throttling:** five wrong guesses from an address lock it out, doubling up to an hour; IPv6 counts as its /64. Each attempt is
+  counted *before* the slow check, so a burst of parallel guesses gets only five tries. Signed-in actions (unlock, password change,
+  recovery key) are limited per profile, so a stranger can never lock someone out; there is deliberately no global lock. Unknown
+  names cost the same work as wrong passwords. Many different addresses can still share the guessing, which a 12-character
+  password and the scrypt cost make impractical.
 - **Sessions:** a signed cookie (HMAC-SHA256, key in `data/.session_key`, mode 0600) naming the profile and a session version;
   changing the password, **Sign out everywhere** or disabling a profile ends every cookie. HttpOnly, SameSite=Strict; on HTTPS
   Secure and named `__Host-kosh_session`. Duplicate cookies with different values are both refused.
@@ -74,7 +77,11 @@ days, not hours, and no bounty.
 ### Data and network
 
 - Statements are parsed locally; nothing is sent anywhere. IMAP is read-only and verifies the server's certificate.
-- Uploads: 50 MB per file, 25 files, `%PDF` magic only; the client's file name is never used as a path.
+- Request limits: forms and JSON are capped at 64 KB, an upload at 25 MB per file, 25 files and 200 MB, `%PDF` only; the client's
+  file name is never used as a path; one profile can run 6 requests at once; a busy ledger answers 503 instead of waiting.
+- Mail: only the receiving server's own `Authentication-Results` is believed (its host must belong to the provider or mail domain);
+  a message that cannot be parsed is recorded as rejected and skipped, never retried forever; custom IMAP hosts must resolve to
+  public addresses; a saved app password is deleted when the server or username changes.
 
 ### What it does not do (read this before hosting)
 
@@ -83,7 +90,12 @@ days, not hours, and no bounty.
 - **Losing both the password and the recovery key loses the data**, by design.
 - A mailbox app password saved in an unlocked profile could be used by someone who controls the running server. Use a
   revocable one, or skip mailbox sync.
-- A statement is written to a temporary file for the moment it is parsed.
+- A statement is written to a temporary file for the moment it is parsed (`/tmp`, in memory when you use the compose files).
+- **A hostile PDF can still use a lot of memory or CPU** while it is parsed (a "decompression bomb"). The container is limited
+  (1.5 GB, 256 processes) and restarts, but everyone then has to unlock again. Parsing in a sandboxed subprocess is on the
+  [ROADMAP](ROADMAP.md).
+- **Rollback:** someone who can already write to the disk could put an older sealed ledger back; it would decrypt fine. The
+  ledger is not versioned against that.
 - `data/users.json` and `audit.log` hold display names and sign-in events in the clear.
 - The Content-Security-Policy still allows inline scripts and styles (the templates use them). A nonce-based policy is on the
   [ROADMAP](ROADMAP.md).

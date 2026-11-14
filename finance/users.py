@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import secrets
 import shutil
 import threading
@@ -245,9 +244,6 @@ class Users:
 
     # admin ----------------------------------------------------------------------------------------
 
-    def admins(self) -> list[dict]:
-        return [u for u in self.all() if u["role"] == "admin" and not u["disabled"]]
-
     def set_disabled(self, uid: str, disabled: bool) -> None:
         with self._lock:
             data = self._load()
@@ -260,15 +256,20 @@ class Users:
             u["sv"] += 1
             self._save(data)
 
+    def ensure_removable(self, uid: str) -> None:
+        """Raise UserError unless this profile may be removed (it exists and is not the only admin)."""
+        data = self._load()
+        u = data["users"].get(uid)
+        if not u:
+            raise UserError("No such profile.")
+        if u["role"] == "admin" and len([a for a in data["users"].values() if a["role"] == "admin"]) <= 1:
+            raise UserError("You cannot remove the only admin.")
+
     def delete(self, uid: str) -> None:
         """Remove a profile and everything sealed in its vault. This cannot be undone."""
         with self._lock:
+            self.ensure_removable(uid)
             data = self._load()
-            u = data["users"].get(uid)
-            if not u:
-                raise UserError("No such profile.")
-            if u["role"] == "admin" and len([a for a in data["users"].values() if a["role"] == "admin"]) <= 1:
-                raise UserError("You cannot remove the only admin.")
             del data["users"][uid]
             self._save(data)
         root = vault.USERS_DIR / uid

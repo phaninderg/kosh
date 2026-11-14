@@ -7,6 +7,13 @@ services:
   kosh:
     image: ghcr.io/phaninderg/kosh:latest
     restart: unless-stopped
+    read_only: true                       # the container's own files cannot be changed; only the data volume and /tmp are writable
+    tmpfs:
+      - /tmp:size=512m,mode=1777          # statements are parsed from here, in memory, never on the disk layer
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 1536m                      # a hostile PDF cannot take the whole machine
+    pids_limit: 256
     environment:
       KOSH_ALLOWED_HOSTS: ${KOSH_DOMAIN:?set KOSH_DOMAIN in .env, e.g. kosh.example.com}
       KOSH_TRUST_PROXY: "1"                 # only Caddy, on the private compose network, can reach the app

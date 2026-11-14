@@ -77,7 +77,7 @@ def test_rescan_backfills_documents_stored_before_details_existed(db_path, seen_
 
 
 def test_rejected_mail_review_item_names_mailbox_and_date(db_path, seen_passwords):
-    runner(db_path, {1: make_email(pdf=make_pdf("s3cret!"), auth="mx; dkim=fail")}).run()
+    runner(db_path, {1: make_email(pdf=make_pdf("s3cret!"), auth="mx.google.com; dkim=fail")}).run()
     reason = analytics.open_review_items(connect_ro(db_path))[0]["reason"]
     assert "gmail-main" in reason and "2025-06-02" in reason and "dkim=fail" in reason
 

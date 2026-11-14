@@ -1,34 +1,19 @@
-"""Keyed hashing so the DB never holds full folio/account numbers.
+"""Keyed hashing so the ledger never holds full folio/account numbers.
 
-The HMAC key comes from LEDGER_HASH_KEY, else a 0600 file under data/ (gitignored).
-Losing the key only breaks matching of *new* imports to old accounts.
+The HMAC key is derived from the signed-in profile's own data key (see vault.py), so there is no shared key file and nothing
+to configure; hashes made for one profile mean nothing to another.
 """
 
 from __future__ import annotations
 
 import hashlib
 import hmac
-import os
-import secrets
-from pathlib import Path
 
-_KEY_FILE = Path(__file__).resolve().parent.parent / "data" / ".hash_key"
+from finance import vault
 
 
 def _key() -> bytes:
-    from finance import vault
-    v = vault.current_vault.get()
-    if v:
-        return v.hash_key()                    # each profile hashes with its own key, derived from its data key
-    env = os.getenv("LEDGER_HASH_KEY")
-    if env:
-        return env.encode()
-    if not _KEY_FILE.exists():
-        _KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(_KEY_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w") as f:
-            f.write(secrets.token_hex(32))
-    return _KEY_FILE.read_text().strip().encode()
+    return vault.require_vault().hash_key()      # raises VaultLocked outside a signed-in context
 
 
 def keyed_hash(*parts: object) -> str:

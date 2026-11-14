@@ -1,5 +1,3 @@
-import os
-os.environ["LEDGER_HASH_KEY"] = "test-key-not-a-secret"   # before any finance import
 
 from datetime import date
 from decimal import Decimal
@@ -67,7 +65,6 @@ def private_data(tmp_path, monkeypatch):
     monkeypatch.setattr(vault, "DATA_DIR", tmp_path / "data")
     monkeypatch.setattr(vault, "USERS_DIR", tmp_path / "data" / "users")
     monkeypatch.setattr(vault, "KDF", {"n": 2**4, "r": 1, "p": 1})
-    monkeypatch.setenv("LEDGER_HASH_KEY", "test-hash-key")
     for k in ("KOSH_ALLOWED_HOSTS", "KOSH_TRUST_PROXY"):
         monkeypatch.delenv(k, raising=False)
     yield

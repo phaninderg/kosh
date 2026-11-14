@@ -5,7 +5,6 @@ import time
 
 import pytest
 
-from finance import vault
 from finance.web import auth
 from tests.softkey import SoftKey
 from tests.test_accounts import PASSWORD, Site

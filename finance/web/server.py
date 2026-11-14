@@ -12,6 +12,11 @@ from finance import users as users_mod
 from finance.web.app import create_app
 
 
+# Only addresses that cannot be on the public internet may set X-Forwarded-For / -Proto: the local machine (Tailscale serve,
+# a proxy on the same host) and private networks (the Caddy container on the compose network).
+TRUSTED_PROXIES = "127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+
+
 def serve() -> None:
     users = users_mod.Users()
     shown = "localhost" if UI_HOST == "0.0.0.0" else UI_HOST
@@ -29,4 +34,4 @@ def serve() -> None:
         except Exception:
             pass
     uvicorn.run(create_app(users=users), host=UI_HOST, port=UI_PORT, log_level="warning",
-                proxy_headers=TRUST_PROXY, forwarded_allow_ips="*" if TRUST_PROXY else "127.0.0.1")
+                proxy_headers=TRUST_PROXY, forwarded_allow_ips=TRUSTED_PROXIES if TRUST_PROXY else "127.0.0.1")

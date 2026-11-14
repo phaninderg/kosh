@@ -30,7 +30,7 @@ class Site:
         self.registry = vault.Registry()
         self.jobs = FakeJobs()
         self.app = webapp.create_app(vault.VAULT_DB, self.jobs, users=self.users, registry=self.registry,
-                                     extra_hosts=["kosh.example.com"])
+                                     extra_hosts=["kosh.example.com", "testserver"])
         self.scheme, self.tmp = scheme, tmp_path
 
     def browser(self) -> TestClient:

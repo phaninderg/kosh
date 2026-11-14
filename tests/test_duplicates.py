@@ -1,6 +1,5 @@
 """Same folio, written differently by different statements (the 'wrong totals after multiple imports' bug)."""
 
-import sqlite3
 from decimal import Decimal
 
 import pytest
