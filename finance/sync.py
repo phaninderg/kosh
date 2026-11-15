@@ -203,6 +203,10 @@ class SyncRunner:
 
     def _attention(self, ledger: Ledger, doc: SourceDocument, rule: SenderRule, reason: str,
                    s: AccountSummary) -> str:
+        if ledger.conn.execute("SELECT 1 FROM source_documents WHERE message_id=? AND sha256=? AND status='imported'",
+                               (doc.message_id, doc.sha256)).fetchone():
+            s.duplicate += 1                                     # an earlier good import being read again: keep it, do not flag it
+            return "known"
         if not self.inbox.exists(f"{doc.sha256}.pdf"):          # keep the file (still locked, and now sealed) so Retry works offline
             self.inbox.write(f"{doc.sha256}.pdf", doc.data)
         ledger.record_attention(sha256=doc.sha256, message_id=doc.message_id, sender=doc.sender,

@@ -639,8 +639,11 @@ class Ledger:
         return self.conn.execute("SELECT * FROM source_documents WHERE id=?", (doc_id,)).fetchone()
 
     def known_document(self, message_id: str, sha256: str) -> str | None:
-        row = self.conn.execute("SELECT status FROM source_documents WHERE message_id=? AND sha256=?",
+        """The document's status, or None when it is new to us or was read by an older parser revision (so it is read again)."""
+        row = self.conn.execute("SELECT status, parse_rev FROM source_documents WHERE message_id=? AND sha256=?",
                                 (message_id, sha256)).fetchone()
+        if row and row["status"] == "imported" and row["parse_rev"] < PARSE_REVISION:
+            return None
         return row["status"] if row else None
 
     # ── mailbox sync state ────────────────────────────────────────────────────

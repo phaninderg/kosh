@@ -355,3 +355,32 @@ def test_imap_will_not_connect_to_private_or_internal_addresses(monkeypatch, hos
     monkeypatch.setattr(imap.socket, "getaddrinfo", lambda *a, **k: [(socket.AF_INET, 1, 6, "", (a, 993)) for a in addresses])
     with pytest.raises(MailboxError, match="not a public mail server"):
         imap._default_connect(host, 993)
+
+
+def test_rescan_reads_again_a_document_an_older_parser_revision_imported(db_path, seen_passwords):
+    msgs = {1: make_email(pdf=make_pdf("s3cret!"), msgid="<fixed@x>")}
+    runner(db_path, msgs).run()
+    led = Ledger(db_path)
+    led.conn.execute("UPDATE source_documents SET parse_rev=1"); led.conn.execute("DELETE FROM imap_state"); led.conn.commit(); led.close()
+    s = runner(db_path, msgs).run().accounts[0]
+    assert (s.imported, s.duplicate, s.attention) == (1, 0, 0)               # read again, not skipped as known
+    s = runner(db_path, msgs).run().accounts[0]
+    assert (s.imported, s.attention) == (0, 0)                               # and now current
+    assert connect_ro(db_path).execute("select count(*) from transactions").fetchone()[0] == 5
+
+
+def test_a_failed_reread_does_not_flag_an_earlier_good_import(db_path, seen_passwords):
+    msgs = {1: make_email(pdf=make_pdf("s3cret!"), msgid="<fixed@x>")}
+    runner(db_path, msgs).run()
+    led = Ledger(db_path)
+    led.conn.execute("UPDATE source_documents SET parse_rev=1"); led.conn.execute("DELETE FROM imap_state"); led.conn.commit(); led.close()
+    import finance.sync as sync_mod
+    real = sync_mod.SyncRunner._import
+    sync_mod.SyncRunner._import = lambda self, ledger, stmt, doc: (_ for _ in ()).throw(ValueError("refused now"))
+    try:
+        s = runner(db_path, msgs).run().accounts[0]
+    finally:
+        sync_mod.SyncRunner._import = real
+    assert s.attention == 0
+    row = connect_ro(db_path).execute("select status from source_documents").fetchone()
+    assert row["status"] == "imported"
