@@ -5,6 +5,8 @@
 {% for x in accounts %}
 <div class="card"><b>{{ x.a.name }}</b> <span class="mute">· {{ x.a.provider }} · {{ x.a.username }} · folder {{ x.a.folder }}</span>
  <p class="mute">App password: {{ '✓ stored' if x.password_set else '✗ not set' }} · Last sync: {% if x.last_sync %}{{ x.last_sync|ts }}{% else %}never{% endif %} · Senders: {{ x.a.senders|map(attribute='match')|join(', ') }}</p>
+ <p class="mute">Automatic sync: {% if x.a.auto_sync_hours %}<b>every {{ x.a.auto_sync_hours }} hour{{ 's' if x.a.auto_sync_hours > 1 }}</b>{% if x.password_set %}, next about {{ x.auto_next|ts_epoch }}{% else %} (needs the app password){% endif %}{% else %}off{% endif %}</p>
+ {% if x.a.auto_sync_hours and x.a.auto_sync_hours > idle_hours %}<p class="flash err">This server locks your data after {{ idle_hours|round|int }} hour{{ 's' if idle_hours|round|int != 1 }} without use, which is shorter than this schedule, so it runs only while you keep using Kosh. To run it unattended, the person who runs the server can raise <code>KOSH_IDLE_LOCK_HOURS</code> to at least {{ x.a.auto_sync_hours }}; the longer it is, the longer your data key stays in the server's memory.</p>{% endif %}
  <form method="post" action="/mailboxes/{{ x.a.name }}/sync" style="display:inline"><button {{ 'disabled' if running }}>Sync now</button></form>
  <form method="post" action="/mailboxes/{{ x.a.name }}/test" style="display:inline"><button class="sec">Test connection</button></form>
  <form method="post" action="/mailboxes/{{ x.a.name }}/rescan" style="display:inline" onsubmit="return confirm('Re-read all allowed mail from the lookback window? Nothing is duplicated; email details are refreshed.')"><button class="sec" {{ 'disabled' if running }}>Re-scan</button></form>
@@ -24,6 +26,9 @@
  <label>Allowed senders — one per line: <code>domain-or-address | parser | password template ; template</code></label>
  <textarea name="senders" rows="5" style="width:100%;font-family:monospace">{{ form.senders }}</textarea>
  <p class="mute">Defaults are the usual CAS senders — confirm them against a real statement email. Templates are optional per sender. A mutual fund (CAS) sender needs none: the default password from Identity is always tried. Tokens: <code>{name4} {NAME4} {mobile5} {ddmm} {ddmmyy} {ddmmyyyy} {yyyy} {pan} {PAN} {password}</code></p>
+ <label>Automatic sync</label>
+ <select name="auto_sync_hours">{% for h in auto_choices %}<option value="{{ h }}" {{ 'selected' if h == form.auto_sync_hours }}>{{ 'Off: only when I press Sync now' if h == 0 else 'Every hour' if h == 1 else 'Every ' ~ h ~ ' hours' }}</option>{% endfor %}</select>
+ <p class="mute">Runs only while your data is unlocked. It never unlocks it for you and does not postpone the idle lock ({{ idle_hours|round|int }} hours without use on this server). After a restart or a lock, it resumes when you next sign in.</p>
  <label><input type="checkbox" name="require_auth" value="1" {{ 'checked' if form.require_auth }} style="width:auto"> Reject mail whose DKIM/SPF/DMARC check explicitly failed</label>
  <p><button>Save mailbox</button></p></form>
 

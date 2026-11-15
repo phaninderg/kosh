@@ -22,6 +22,7 @@ from fastapi.templating import Jinja2Templates
 from config import ALLOWED_HOSTS, PUBLIC_PORT, UI_HOST, UI_PORT
 from finance import analytics
 from finance.db import connect_ro
+from finance import autosync as autosync_mod
 from finance.jobs import JobManager
 from finance import users as users_mod, vault
 from finance.web import accounts, auth as auth_mod, pwa
@@ -81,6 +82,7 @@ def create_app(db_path: str = vault.VAULT_DB, jobs: JobManager | None = None, ma
     allowed_hosts |= set(ALLOWED_HOSTS if extra_hosts is None else extra_hosts)       # the domain a hosted instance answers to
     pwa.register(app)
     in_flight: dict[str, threading.BoundedSemaphore] = {}              # requests running at once, per profile
+    app.state.autosync = autosync_mod.AutoSync(registry, jobs)         # started by the server, never by create_app (tests call tick())
 
     app.mount("/static", StaticFiles(directory=str(HERE / "static")), name="static")
 
@@ -391,19 +393,24 @@ def create_app(db_path: str = vault.VAULT_DB, jobs: JobManager | None = None, ma
             states = {r["account"]: r for r in conn.execute("SELECT * FROM imap_state")}
         finally:
             conn.close()
-        accounts = [dict(a=a, password_set=secret_store.has_secret(a.secret_key),
+        state, now = autosync_mod.load_state(), time.time()
+        accounts = [dict(a=a, auto_next=autosync_mod.next_run(a.auto_sync_hours, state.get(a.name), now),
+                         password_set=secret_store.has_secret(a.secret_key),
                          last_sync=(states.get(a.name) or {"last_sync": None})["last_sync"] if a.name in states else None,
                          senders=format_sender_lines(a.senders)) for a in cfg.accounts]
         current = next((x for x in accounts if x["a"].name == edit), None)
         form = form or ({"name": current["a"].name, "provider": current["a"].provider,
                          "username": current["a"].username, "host": current["a"].host or "",
                          "folder": current["a"].folder, "lookback_days": current["a"].lookback_days,
-                         "senders": current["senders"], "require_auth": current["a"].require_auth}
+                         "senders": current["senders"], "require_auth": current["a"].require_auth,
+                         "auto_sync_hours": current["a"].auto_sync_hours}
                         if current else {"name": "", "provider": "gmail", "username": "", "host": "",
                                          "folder": "INBOX", "lookback_days": 365,
-                                         "senders": format_sender_lines(default_cas_rules()), "require_auth": True})
+                                         "senders": format_sender_lines(default_cas_rules()), "require_auth": True,
+                                         "auto_sync_hours": 0})
         return dict(page="mailboxes", accounts=accounts, flash=flash, error=error, form=form, editing=bool(current),
-                    running=jobs.running())
+                    running=jobs.running(), auto_choices=autosync_mod.AUTO_SYNC_CHOICES,
+                    idle_hours=registry.idle / 3600)
 
     @app.get("/mailboxes", response_class=HTMLResponse)
     def mailboxes_page(request: Request, edit: str = "", flash: str = ""):
@@ -412,13 +419,15 @@ def create_app(db_path: str = vault.VAULT_DB, jobs: JobManager | None = None, ma
     @app.post("/mailboxes/save", response_class=HTMLResponse)
     def mailboxes_save(request: Request, name: str = Form(...), provider: str = Form(...), username: str = Form(...),
                        host: str = Form(""), folder: str = Form("INBOX"), lookback_days: int = Form(365),
-                       senders: str = Form(""), app_password: str = Form(""), require_auth: str = Form("")):
-        form = dict(name=name, provider=provider, username=username, host=host, folder=folder,
+                       senders: str = Form(""), app_password: str = Form(""), require_auth: str = Form(""),
+                       auto_sync_hours: int = Form(0)):
+        form = dict(name=name, provider=provider, username=username, host=host, folder=folder, auto_sync_hours=auto_sync_hours,
                     lookback_days=lookback_days, senders=senders, require_auth=bool(require_auth))
         try:
             acct = MailboxAccount(name=name, provider=provider, username=username.strip(), host=host.strip() or None,
                                   folder=folder.strip() or "INBOX", lookback_days=lookback_days,
-                                  require_auth=bool(require_auth), senders=parse_sender_lines(senders))
+                                  require_auth=bool(require_auth), senders=parse_sender_lines(senders),
+                                  auto_sync_hours=auto_sync_hours)
             acct.imap_host
             if not acct.senders:
                 raise ValueError("add at least one allowed sender")

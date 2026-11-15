@@ -211,7 +211,6 @@ class Vault:
         self._closed = False
         self._master: bytes | None = None
         self._loaded = False
-        self.last_used = time.time()
 
     def close(self) -> None:
         """Lock this vault for good: forget the key and refuse every later read, write or commit, including from a job that is
@@ -290,7 +289,6 @@ class Vault:
     def connect(self, writable: bool) -> VaultConnection:
         """A private in-memory copy of the ledger. A writer holds the write lock until it closes."""
         self._check()
-        self.last_used = time.time()
         if writable and not self._write_lock.acquire(timeout=self.WRITE_WAIT):
             raise VaultBusy("the ledger is busy (a sync or import is writing); try again in a moment")
         try:
@@ -366,37 +364,51 @@ def require_vault() -> Vault:
 
 
 class Registry:
-    """Unlocked vaults held in memory, dropped after IDLE_LOCK_SECONDS without use."""
+    """Unlocked vaults held in memory, dropped after `idle` seconds without a person using them.
+
+    The time of last use lives here, not on the Vault, and only get() and unlock() refresh it. Background work (a mail sync,
+    the scheduler's peek_all) works on the Vault directly and has no way to touch the timer, so it cannot keep a key in memory
+    longer than the person chose."""
 
     def __init__(self, idle: int | None = None, clock=time.time):
         self._vaults: dict[str, Vault] = {}
+        self._last: dict[str, float] = {}
         self._lock = threading.Lock()
         self.idle, self._clock = idle if idle is not None else IDLE_LOCK_SECONDS, clock
 
     def unlock(self, uid: str, dek: bytes) -> Vault:
         with self._lock:
-            existing = self._vaults.get(uid)
-            if existing:
-                existing.last_used = self._clock()
-                return existing
-            vault = self._vaults[uid] = Vault(uid, dek)
-            vault.last_used = self._clock()
+            vault = self._vaults.get(uid) or self._vaults.setdefault(uid, Vault(uid, dek))
+            self._last[uid] = self._clock()
             return vault
 
+    def _expire(self, uid: str) -> bool:
+        """Lock `uid` if it has been idle too long (caller holds the lock). True if it was locked."""
+        if uid in self._vaults and self._clock() - self._last[uid] > self.idle:
+            self._vaults.pop(uid).close()
+            self._last.pop(uid, None)
+            return True
+        return False
+
     def get(self, uid: str) -> Vault | None:
+        """The unlocked vault for a person's own request: this counts as use and restarts the idle timer."""
         with self._lock:
-            v = self._vaults.get(uid)
-            if v and self._clock() - v.last_used > self.idle:
-                del self._vaults[uid]                       # locked by inactivity
-                v.close()
+            if self._expire(uid) or uid not in self._vaults:
                 return None
-            if v:
-                v.last_used = self._clock()
-            return v
+            self._last[uid] = self._clock()
+            return self._vaults[uid]
+
+    def peek_all(self) -> list[Vault]:
+        """Every vault unlocked right now, for background work. Does not count as use; locks any that are already idle."""
+        with self._lock:
+            for uid in list(self._vaults):
+                self._expire(uid)
+            return list(self._vaults.values())
 
     def lock(self, uid: str) -> None:
         with self._lock:
             v = self._vaults.pop(uid, None)
+            self._last.pop(uid, None)
         if v:
             v.close()
 

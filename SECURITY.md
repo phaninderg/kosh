@@ -44,6 +44,9 @@ days, not hours, and no bounty.
 - The unwrapped key lives only in memory, while the person is unlocked. It is dropped on lock, after 8 idle hours
   (`KOSH_IDLE_LOCK_HOURS`), on **Sign out everywhere**, when a profile is disabled, and on restart. A passkey signs you in but
   cannot unlock data by itself; the password does.
+- **Automatic mail sync** (every 1 or 6 hours, per mailbox) runs only while a person's data is already unlocked. It never unlocks, and
+  the idle timer is refreshed only by a person's own requests, never by a background sync, so the scheduler cannot keep a key in
+  memory longer than the idle limit.
 - So the admin, other profiles, and anyone who copies the data folder or a backup get ciphertext. `data/users.json` holds
   display names, roles, wrapped keys and public passkey records, and no financial data.
 

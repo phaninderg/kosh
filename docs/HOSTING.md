@@ -91,6 +91,13 @@ It needs HTTPS, which both options above provide; an installed app will not work
 Then add a passkey: **Account → Add a passkey on this device** (needs a sign-in from the last ten minutes), or make a code on
 your laptop (**Account → Make a code…**) and enter it on the phone's sign-in page.
 
+## Automatic mail sync and the idle lock
+
+Each mailbox can sync by itself **every hour or every 6 hours** (Mailboxes page, *Automatic sync*). It works only while your data
+is unlocked, and it never unlocks anything or postpones the idle lock. So after you stop using Kosh it keeps syncing for
+`KOSH_IDLE_LOCK_HOURS` (8 by default), then pauses; the next time you unlock, an overdue sync starts within a minute. To keep it
+running longer, set a longer `KOSH_IDLE_LOCK_HOURS`, knowing your data key then stays in the server's memory that long.
+
 ## Day-to-day
 
 - **Upgrade:** `docker compose -f docker-compose.vps.yml pull && docker compose -f docker-compose.vps.yml up -d`. Data stays in the volume.

@@ -62,6 +62,7 @@ class MailboxAccount(BaseModel):
     folder: str = "INBOX"
     lookback_days: int = Field(365, ge=1, le=3650)         # only used on the first sync
     require_auth: bool = True                              # reject mail whose DKIM/SPF/DMARC explicitly failed
+    auto_sync_hours: Literal[0, 1, 6] = 0          # 0 = only when you press Sync now (see finance/autosync.py)
     senders: list[SenderRule] = Field(default_factory=list)
 
     @field_validator("name")
@@ -106,6 +107,7 @@ def default_cas_rules() -> list[SenderRule]:
 
 
 VAULT_NAME = "mailboxes.json"
+AUTO_SYNC_CHOICES = (0, 1, 6)       # longer intervals would outlast the idle lock (8 h), so they could never run unattended
 
 
 def load_config(path: str = vault.VAULT_FILES) -> MailConfig:

@@ -33,5 +33,7 @@ def serve() -> None:
             webbrowser.open(base + ("/signup" if setup_code else "/"))
         except Exception:
             pass
-    uvicorn.run(create_app(users=users), host=UI_HOST, port=UI_PORT, log_level="warning",
+    app = create_app(users=users)
+    app.state.autosync.start()                            # per-mailbox automatic sync, only while a person's data is unlocked
+    uvicorn.run(app, host=UI_HOST, port=UI_PORT, log_level="warning",
                 proxy_headers=TRUST_PROXY, forwarded_allow_ips=TRUSTED_PROXIES if TRUST_PROXY else "127.0.0.1")
