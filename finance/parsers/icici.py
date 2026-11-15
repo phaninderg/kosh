@@ -21,7 +21,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 
-from finance.models import AccountTxn, ParsedAccount, ParsedAccountStatement, ParsedDeposit
+from finance.models import GENERIC_ACCOUNT_LABEL, AccountTxn, ParsedAccount, ParsedAccountStatement, ParsedDeposit
 from finance.parsers.base import register
 from finance.parsers.pdftext import Word, group_lines as _lines, line_text as _text, read_pages
 from finance.redact import redact
@@ -104,7 +104,9 @@ class _Section:
     def __init__(self, label: str, identifier: str, period_from: date, period_to: date):
         self.label, self.identifier = label, identifier
         self.period_from, self.period_to = period_from, period_to
-        self.type = ACCOUNT_TYPES.get(label.strip().lower())
+        self.type = ACCOUNT_TYPES.get(label.strip().lower())      # None for a kind this version has no name for: resolved at the end
+        self.generic = False                                       # true when the kind is not one we know, so a failed check skips it
+        self.failure = ""                                          # why an account of an unknown kind could not be read
         self.opening: Decimal | None = None
         self.last: Decimal | None = None
         self.txns: list[AccountTxn] = []
@@ -122,6 +124,8 @@ class _Parser:
         self.fd_rows: list[tuple[str, re.Match]] = []
         self.summary_fd: dict[str, Decimal] = {}            # per account: the linked-FD balance the summary page prints
         self.fd_unreadable = 0                              # deposit-looking rows that could not be read
+        self.summary_label: dict[str, str] = {}             # account number -> the kind the summary page lists it as
+        self.recurring_seen = False
         self.warnings: list[str] = []
         self.page = 0
         self.skip_page_top = False        # inside a section at the start of a page: ignore lines until the header repeats
@@ -172,9 +176,6 @@ class _Parser:
         ident, label = m.group("id"), m.group("label") or ""
         if ident not in self.sections:
             self.sections[ident] = _Section(label, ident, _long_day(m.group("from")), _long_day(m.group("to")))
-            if self.sections[ident].type is None and label:
-                self.warnings.append(f"{label} account …{ident[-4:]}: this account type is not supported yet, its transactions "
-                                     f"were not imported.")
         self.cur = self.sections[ident]
 
     def _summary_line(self, text: str) -> None:
@@ -182,6 +183,7 @@ class _Parser:
             self.as_of = _long_day(m.group("d"))
         if (m := _SUMMARY_ROW.match(text)):
             self.summary[m.group("id")] = _num(m.group("bal"))
+            self.summary_label[m.group("id")] = m.group("label").strip()
             if m.group("fd"):
                 self.summary_fd[m.group("id")] = _num(m.group("fd"))
         if (m := _FD_LINKED.search(text)):
@@ -192,8 +194,8 @@ class _Parser:
             self.fd_unreadable += 1
             self.warnings.append(f"A fixed deposit row (…{m.group('num')[-4:]}) is in a layout this version cannot read, so that "
                                  f"deposit was not imported.")
-        if re.search(r"RECURRING DEPOSIT", text, re.I) and not any("ecurring" in w for w in self.warnings):
-            self.warnings.append("Recurring deposits appear on this statement but are not imported yet.")
+        if re.search(r"RECURRING DEPOSIT", text, re.I):
+            self.recurring_seen = True
 
     # ── one table (the rows between a header and its Total row) ───────────────
 
@@ -220,32 +222,39 @@ class _Parser:
         rows = [self._anchor(line) for line in anchors]
         pieces = _distribute(rows, [(line[0].top, _text(line)) for line in extra])
 
-        dep_sum = wd_sum = Decimal(0)
-        for r, parts in zip(rows, pieces):
-            particulars = re.sub(r"\s+", " ", " ".join(t for _, t in sorted(parts))).strip()
-            if particulars == "B/F":
-                if sec.opening is None:
-                    sec.opening, sec.last = r["bal"], r["bal"]
-                continue
-            if (r["dep"] is None) == (r["wd"] is None) or r["bal"] is None:
-                raise ValueError(f"row dated {r['date']}: expected one amount in DEPOSITS or WITHDRAWALS and a balance")
-            if sec.last is None:
-                raise ValueError(f"row dated {r['date']} comes before the opening balance")
-            amount = r["dep"] if r["dep"] is not None else -r["wd"]
-            if sec.last + amount != r["bal"]:
-                raise ValueError(f"row dated {r['date']}: {sec.last} {'+' if amount >= 0 else '-'} {abs(amount)} "
-                                 f"is not the printed balance {r['bal']}")
-            dep_sum += r["dep"] or 0
-            wd_sum += r["wd"] or 0
-            sec.last = r["bal"]
-            full = re.sub(r"\s+", " ", f"{r['mode']} {particulars}").strip()
-            sec.txns.append(AccountTxn(
-                date=r["date"], description=redact(full, limit=300), amount=amount, balance=r["bal"],
-                kind="CREDIT" if amount > 0 else "DEBIT", mode=r["mode"], reference=_reference(full)))
+        if sec.failure:                                  # an account of an unknown kind that already failed: nothing more to read
+            return
+        try:
+            dep_sum = wd_sum = Decimal(0)
+            for r, parts in zip(rows, pieces):
+                particulars = re.sub(r"\s+", " ", " ".join(t for _, t in sorted(parts))).strip()
+                if particulars == "B/F":
+                    if sec.opening is None:
+                        sec.opening, sec.last = r["bal"], r["bal"]
+                    continue
+                if (r["dep"] is None) == (r["wd"] is None) or r["bal"] is None:
+                    raise ValueError(f"row dated {r['date']}: expected one amount in DEPOSITS or WITHDRAWALS and a balance")
+                if sec.last is None:
+                    raise ValueError(f"row dated {r['date']} comes before the opening balance")
+                amount = r["dep"] if r["dep"] is not None else -r["wd"]
+                if sec.last + amount != r["bal"]:
+                    raise ValueError(f"row dated {r['date']}: {sec.last} {'+' if amount >= 0 else '-'} {abs(amount)} "
+                                     f"is not the printed balance {r['bal']}")
+                dep_sum += r["dep"] or 0
+                wd_sum += r["wd"] or 0
+                sec.last = r["bal"]
+                full = re.sub(r"\s+", " ", f"{r['mode']} {particulars}").strip()
+                sec.txns.append(AccountTxn(
+                    date=r["date"], description=redact(full, limit=300), amount=amount, balance=r["bal"],
+                    kind="CREDIT" if amount > 0 else "DEBIT", mode=r["mode"], reference=_reference(full)))
 
-        if (dep_sum, wd_sum) != (totals["dep"], totals["wd"]) or sec.last != totals["bal"]:
-            raise ValueError(f"page totals do not match the rows read (deposits {dep_sum} vs {totals['dep']}, "
-                             f"withdrawals {wd_sum} vs {totals['wd']}, balance {sec.last} vs {totals['bal']})")
+            if (dep_sum, wd_sum) != (totals["dep"], totals["wd"]) or sec.last != totals["bal"]:
+                raise ValueError(f"page totals do not match the rows read (deposits {dep_sum} vs {totals['dep']}, "
+                                 f"withdrawals {wd_sum} vs {totals['wd']}, balance {sec.last} vs {totals['bal']})")
+        except ValueError as exc:
+            if sec.type is not None:                     # a kind we know must add up, or the whole statement is refused
+                raise
+            sec.failure = str(exc)                       # an unknown kind is left out with a warning and cannot block the others
 
     def _anchor(self, line: list[Word]) -> dict:
         m = _DATE.match(line[0].text)
@@ -265,37 +274,53 @@ class _Parser:
 
     # ── result ────────────────────────────────────────────────────────────────
 
-    def _name_unnamed_accounts(self) -> None:
-        """A statement you request lists every account but may name only the savings one. A transfer between your own accounts
-        carries the same SR id on both legs, and the savings leg says "TO PPF": so an unnamed account that holds the other leg
-        of such a transfer is that PPF account. With no such evidence it is left out, and the warning says why."""
+    def _resolve_kinds(self) -> None:
+        """Decide what every section is. A statement lists whatever accounts you hold, so nothing here is limited to the kinds
+        we have seen: a section whose heading (or the summary page) names a kind we know is that kind; one that names a kind
+        we do not know (an overdraft, anything new) is read exactly the same way and kept as its own account under that name;
+        one that names nothing is recognised as the PPF when the savings account's `TO PPF` rows share their SR transfer id with
+        its rows, and otherwise kept as a generic account. Every one of them must still pass the balance checks."""
         ppf_legs = {t.reference for s in self.sections.values() if s.type == "bank" for t in s.txns
                     if t.reference.startswith("SR") and re.search(r"\bPPF\b", t.description, re.I)}
         for sec in self.sections.values():
-            if sec.type is not None or sec.label:
+            if sec.type is not None:
                 continue
-            if any(t.reference in ppf_legs for t in sec.txns):
-                sec.type, sec.label = "ppf", "PPF"
+            label = (sec.label or self.summary_label.get(sec.identifier, "")).strip()
+            if label and label.lower() in ACCOUNT_TYPES:
+                sec.label, sec.type = label, ACCOUNT_TYPES[label.lower()]
+            elif label:
+                sec.label, sec.type, sec.generic = label.title(), "bank", True
+            elif any(t.reference in ppf_legs for t in sec.txns):
+                sec.label, sec.type = "PPF", "ppf"
             else:
-                self.warnings.append(f"An account …{sec.identifier[-4:]} whose type the statement does not name was not imported: nothing "
-                                     f"in this statement shows what it is. A monthly statement names it, so import one of those.")
+                sec.label, sec.type, sec.generic = GENERIC_ACCOUNT_LABEL, "bank", True
 
     def result(self) -> ParsedAccountStatement:
         if self.chunk is not None:
             raise ValueError("a transaction table ended without its Total row; layout not recognised")
-        self._name_unnamed_accounts()
+        self._resolve_kinds()
         accounts: list[ParsedAccount] = []
         for sec in self.sections.values():
-            if sec.type is None:
+            if sec.failure:                                # (only ever set for a kind we did not know when reading its rows)
+                self.warnings.append(f"{sec.label} account …{sec.identifier[-4:]} was left out: {sec.failure}")
                 continue
             if sec.opening is None:
+                if sec.generic:
+                    self.warnings.append(f"{sec.label} account …{sec.identifier[-4:]} was left out: no opening balance row was found.")
+                    continue
                 raise ValueError(f"{sec.label} account …{sec.identifier[-4:]}: no opening balance (B/F) row found")
             acct = ParsedAccount(type=sec.type, label=sec.label, institution=INSTITUTION, identifier=sec.identifier,
                                  period_from=sec.period_from, period_to=sec.period_to, opening_balance=sec.opening,
                                  closing_balance=sec.last, txns=sec.txns)
             errs = acct.integrity_errors()
+            if errs and sec.generic:                       # an account of a kind we do not know must not block the ones we do
+                self.warnings.append(f"{sec.label} account …{sec.identifier[-4:]} was left out: {errs[0]}")
+                continue
             if errs:
                 raise ValueError(f"{sec.label} account …{sec.identifier[-4:]}: {errs[0]}")
+            if sec.label == GENERIC_ACCOUNT_LABEL:
+                self.warnings.append(f"An account …{sec.identifier[-4:]} whose type the statement does not name was imported as a separate "
+                                     f"“{GENERIC_ACCOUNT_LABEL}”: its balance matches its transactions, but nothing says what kind it is.")
             if sec.identifier in self.summary and self.summary[sec.identifier] != acct.closing_balance:
                 self.warnings.append(f"{sec.label} account …{sec.identifier[-4:]}: the summary page shows "
                                      f"{self.summary[sec.identifier]} but the transactions end at {acct.closing_balance}.")
@@ -303,6 +328,8 @@ class _Parser:
         if not accounts:
             raise ValueError("no account transactions found; is this an ICICI account statement?")
 
+        if self.recurring_seen and not any("ecurring" in a.label for a in accounts):
+            self.warnings.append("Recurring deposits appear on this statement but are not imported yet.")
         as_of = self.as_of or max(a.period_to for a in accounts)
         deposits = [ParsedDeposit(
             number=m.group("num"), institution=INSTITUTION, linked_account=linked, open_date=_day(m.group("open")),

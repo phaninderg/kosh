@@ -86,12 +86,28 @@ def test_references_are_found_and_long_numbers_masked(tmp_path):
     assert by_amount[Decimal("-500")].reference == "100000000001" and "100000000001" not in by_amount[Decimal("-500")].description
 
 
-def test_an_account_whose_type_the_statement_does_not_name_is_skipped_with_a_warning(tmp_path):
+def test_an_account_whose_type_the_statement_does_not_name_is_kept_as_its_own_generic_account_with_a_warning(tmp_path):
     pdf = icici_requested_statement([section("", OTHER, "100.00", [row("05-04-2025", "-10")], period=PERIOD),
                                      section("Savings", SAV, "10000.00", rows(), period=PERIOD)])
     st = parse(pdf, tmp_path)
-    assert [a.identifier for a in st.accounts] == [SAV]
+    by = {a.identifier: a for a in st.accounts}
+    assert set(by) == {SAV, OTHER} and (by[OTHER].type, by[OTHER].label) == ("bank", "Account")
+    assert by[OTHER].closing_balance == Decimal("90.00") and by[OTHER].integrity_errors() == []         # still checked against its rows
     assert any("does not name" in w and OTHER[-4:] in w for w in st.warnings)
+
+
+def test_the_summary_page_can_name_an_account_the_heading_does_not(tmp_path):
+    pdf = icici_requested_statement([section("", OTHER, "100.00", [row("05-04-2025", "-10")], period=PERIOD, summary_label="Overdraft"),
+                                     section("Savings", SAV, "10000.00", rows(), period=PERIOD)])
+    st = parse(pdf, tmp_path)
+    od = next(a for a in st.accounts if a.identifier == OTHER)
+    assert (od.type, od.label) == ("bank", "Overdraft") and st.warnings == []
+
+
+def test_a_summary_that_calls_the_account_ppf_makes_it_a_ppf(tmp_path):
+    pdf = icici_requested_statement([section("", OTHER, "100.00", [row("05-04-2025", "10")], period=PERIOD, summary_label="PPF"),
+                                     section("Savings", SAV, "10000.00", rows(), period=PERIOD)])
+    assert next(a for a in parse(pdf, tmp_path).accounts if a.identifier == OTHER).type == "ppf"
 
 
 def _with_ppf_transfers(ppf_ref="SR123456789", unnamed=True):
@@ -113,11 +129,12 @@ def test_an_unnamed_account_that_receives_a_to_ppf_transfer_is_the_ppf_account(t
     assert by_id[SAV].type == "bank"
 
 
-def test_an_unnamed_account_with_no_matching_transfer_is_left_out_and_the_warning_says_why(tmp_path):
+def test_an_unnamed_account_with_no_matching_transfer_is_kept_generic_and_the_warning_says_so(tmp_path):
     st = parse(_with_ppf_transfers(ppf_ref="SR999999999"), tmp_path)                 # the SR id matches no "TO PPF" row
-    assert [a.identifier for a in st.accounts] == [SAV]
+    by = {a.identifier: a for a in st.accounts}
+    assert set(by) == {SAV, OTHER} and (by[OTHER].type, by[OTHER].label) == ("bank", "Account")
     (w,) = st.warnings
-    assert OTHER[-4:] in w and "does not name" in w and "monthly statement" in w
+    assert OTHER[-4:] in w and "does not name" in w and "nothing says what kind" in w
 
 
 def test_a_transfer_that_does_not_mention_ppf_never_names_an_account(tmp_path):
@@ -125,7 +142,8 @@ def test_a_transfer_that_does_not_mention_ppf_never_names_an_account(tmp_path):
     ppf = [row("12-04-2025", "5000", own="FRM SB 236000000000_SR123456789")]
     st = parse(icici_requested_statement([section("", OTHER, "100.00", ppf, period=PERIOD),
                                           section("Savings", SAV, "10000.00", savings, period=PERIOD)]), tmp_path)
-    assert [a.identifier for a in st.accounts] == [SAV] and len(st.warnings) == 1
+    other = next(a for a in st.accounts if a.identifier == OTHER)
+    assert (other.type, other.label) == ("bank", "Account") and len(st.warnings) == 1                  # never named PPF without evidence
 
 
 def test_a_ppf_named_from_the_transfers_joins_the_ppf_account_from_the_monthly_statements(db_path, tmp_path):
@@ -226,3 +244,28 @@ def test_the_import_page_reads_a_requested_statement_and_a_wrong_file_says_why(c
     from tests.pdffix import build_pdf
     bad = client.post("/import", files={"file": ("x.pdf", build_pdf([[(40, 60, "Hello")]]), "application/pdf")}, data={"parser": "bank"})
     assert "no account transactions found; is this an ICICI account statement?" in bad.text
+
+
+def test_a_generic_account_joins_the_account_with_the_same_last_digits_and_is_renamed_when_a_later_statement_names_it(db_path, tmp_path):
+    from finance.db import connect_ro
+    led = Ledger(db_path)
+    unnamed = icici_requested_statement([section("", OTHER, "100.00", [row("05-04-2025", "-10")], period=PERIOD),
+                                         section("Savings", SAV, "10000.00", rows(), period=PERIOD)])
+    led.import_statement(parse(unnamed, tmp_path), sha256="a" * 64)
+    conn = connect_ro(db_path)
+    assert conn.execute("select name from accounts where mask=?", (OTHER[-4:],)).fetchone()[0] == f"ICICI Bank Account …{OTHER[-4:]}"
+    monthly = icici_statement([section("PPF", "XXXXXXXX" + OTHER[-4:], "90.00", [row("15-04-2025", "5", own="FRM SB 236000000000_SR123456789")])])
+    led.import_statement(parse(monthly, tmp_path), sha256="b" * 64)
+    rows_ = connect_ro(db_path).execute("select type, name from accounts where mask=?", (OTHER[-4:],)).fetchall()
+    assert [tuple(r) for r in rows_] == [("ppf", f"ICICI Bank PPF …{OTHER[-4:]}")]                        # one account, now correctly named
+
+
+def test_a_generic_account_attaches_to_an_existing_account_with_its_last_digits_whatever_its_kind(db_path, tmp_path):
+    from finance.db import connect_ro
+    led = Ledger(db_path)
+    monthly = icici_statement([section("PPF", "XXXXXXXX" + OTHER[-4:], "90.00", [row("15-04-2025", "5", own="FRM SB 236000000000_SR123456789")])])
+    led.import_statement(parse(monthly, tmp_path), sha256="a" * 64)
+    unnamed = icici_requested_statement([section("", OTHER, "95.00", [row("05-05-2025", "-10")], period=PERIOD),
+                                         section("Savings", SAV, "10000.00", rows(), period=PERIOD)])
+    led.import_statement(parse(unnamed, tmp_path), sha256="b" * 64)
+    assert connect_ro(db_path).execute("select count(*) from accounts where mask=?", (OTHER[-4:],)).fetchone()[0] == 1

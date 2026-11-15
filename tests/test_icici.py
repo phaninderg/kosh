@@ -136,11 +136,30 @@ def test_not_a_statement_is_refused(tmp_path):
         parse(build_pdf([[(40, 60, "Hello world")]]), tmp_path)
 
 
-def test_unsupported_account_type_warns_instead_of_silently_skipping(tmp_path):
+def test_an_account_of_a_kind_nobody_has_heard_of_is_read_like_any_other_and_kept_separate(tmp_path):
     pdf = icici_statement([section("Savings", SAV, "1000.00", [row("02-10-2026", "-100")]),
-                           section("Recurring", "XXXXXXXX9999", "10.00", [row("02-10-2026", "5")])])
+                           section("Overdraft", "XXXXXXXX9999", "10.00", [row("02-10-2026", "5"), row("03-10-2026", "-2")]),
+                           section("Abcd", "XXXXXXXX8888", "500.00", [row("04-10-2026", "50")])])
     st = parse(pdf, tmp_path)
-    assert len(st.accounts) == 1 and any("not supported" in w for w in st.warnings)
+    by = {a.identifier[-4:]: a for a in st.accounts}
+    assert set(by) == {"1234", "9999", "8888"} and st.warnings == []                          # no warning: reading new kinds is expected
+    assert (by["9999"].type, by["9999"].label, by["9999"].closing_balance) == ("bank", "Overdraft", Decimal("13.00"))
+    assert (by["8888"].label, by["8888"].opening_balance, by["8888"].closing_balance) == ("Abcd", Decimal("500.00"), Decimal("550.00"))
+    assert all(a.integrity_errors() == [] for a in st.accounts)                              # each is checked against its own transactions
+
+
+def test_a_new_kind_whose_balances_do_not_match_its_transactions_is_left_out_without_blocking_the_rest(tmp_path):
+    pdf = icici_statement([section("Savings", SAV, "1000.00", [row("02-10-2026", "-100")]),
+                           section("Overdraft", "XXXXXXXX9999", "10.00", [row("02-10-2026", "5", bal="999.00")])])
+    st = parse(pdf, tmp_path)
+    assert [a.identifier for a in st.accounts] == [SAV]
+    assert any("Overdraft account …9999 was left out" in w for w in st.warnings)
+
+
+def test_a_known_kind_that_does_not_add_up_still_refuses_the_whole_statement(tmp_path):
+    pdf = icici_statement([section("Savings", SAV, "1000.00", [row("02-10-2026", "-100", bal="1.00")])])
+    with pytest.raises(ValueError, match="printed balance"):
+        parse(pdf, tmp_path)
 
 
 # ── ledger ────────────────────────────────────────────────────────────────────
@@ -479,7 +498,7 @@ def _fd_statement(*fd_lines, fd_in_summary=None):
                            fds=[dict(linked=SAV, text=t) for t in fd_lines])
 
 
-@pytest.mark.parametrize("tenure", ["12 Mths 0 Days", "6 Mths", "400 Days", "1 Yrs 6 Mths", "2 Years", "1 Yrs 0 Mths 15 Days"])
+@pytest.mark.parametrize("tenure", ["12 Mths 0 Days", "6 Mths", "36 Mths", "36 Mths 1 Day", "36 Mths 2 Days", "400 Days", "1 Day", "1 Yrs 6 Mths", "2 Years", "1 Yrs 0 Mths 15 Days"])
 def test_a_deposit_is_read_whatever_form_its_tenure_is_printed_in(tmp_path, tenure):
     line = f"900000000009 05-03-2026 50,000.00 7.10 {tenure} 53,400.00 05-03-2027 50,000.00 Not Registered"
     st = parse(_fd_statement(line), tmp_path)
@@ -488,7 +507,8 @@ def test_a_deposit_is_read_whatever_form_its_tenure_is_printed_in(tmp_path, tenu
 
 
 def test_three_deposits_are_three_deposits(tmp_path):
-    lines = [f"90000000000{i} 05-03-2026 {i}0,000.00 6.75 12 Mths 0 Days 5{i},400.00 05-03-2027 {i}0,000.00 Registered" for i in (1, 2, 3)]
+    lines = [f"90000000000{i} 05-03-2026 {i}0,000.00 6.75 {t} 5{i},400.00 05-03-2027 {i}0,000.00 Registered"
+             for i, t in ((1, "12 Mths"), (2, "36 Mths"), (3, "36 Mths 1 Day"))]                  # the third one was being dropped
     assert [d.number[-1] for d in parse(_fd_statement(*lines), tmp_path).deposits] == ["1", "2", "3"]
 
 

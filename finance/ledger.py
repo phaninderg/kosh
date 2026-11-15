@@ -15,7 +15,7 @@ from decimal import Decimal
 
 from finance.db import connect_rw
 from finance.hashing import keyed_hash, last4
-from finance.models import (ImportResult, ParsedAccount, ParsedAccountStatement, ParsedDeposit,
+from finance.models import (GENERIC_ACCOUNT_LABEL, ImportResult, ParsedAccount, ParsedAccountStatement, ParsedDeposit,
                             ParsedStatement, ParsedScheme)
 
 UNITS_TOLERANCE = Decimal("0.001")
@@ -166,7 +166,7 @@ class Ledger:
             for acct in stmt.accounts:
                 acct_id, _ = self._upsert_account(
                     acct.type, acct.institution, acct.identifier, label=acct.label,
-                    liability=1 if acct.type == "card" else 0)
+                    liability=1 if acct.type == "card" else 0, generic=acct.label == GENERIC_ACCOUNT_LABEL)
                 ids[acct.identifier] = acct_id
                 self._write_account_txns(acct_id, doc_id, acct, result, redactor)
                 if acct.period_to:
@@ -315,7 +315,7 @@ class Ledger:
 
     def _upsert_account(self, type_: str, institution: str, identifier: str,
                         isins: tuple = (), units: dict | None = None, *, label: str = "",
-                        liability: int = 0) -> tuple[int, bool]:
+                        liability: int = 0, generic: bool = False) -> tuple[int, bool]:
         """(account id, reached through an alias). An alias is a spelling of the folio that a merge or match
         taught us belongs to an existing account. Summary statements do not name the fund house, so for
         those the folio is matched against known accounts instead of creating a new one."""
@@ -333,12 +333,23 @@ class Ledger:
         if adopted:
             return adopted, False
         mask = last4(identifier)
+        marks = ",".join("?" * len(SAME_MASK_TYPES))
         if type_ in SAME_MASK_TYPES and mask:                    # a monthly email masks the number, a requested statement prints it whole
-            same = self.conn.execute("SELECT id FROM accounts WHERE type=? AND lower(institution)=? AND mask=? ORDER BY id",
-                                     (type_, inst_key, mask)).fetchall()
+            # a statement that never names the account joins whatever account already has these last digits, of any kind
+            same = self.conn.execute(f"SELECT id FROM accounts WHERE type IN ({marks}) AND lower(institution)=? AND mask=? ORDER BY id"
+                                     if generic else "SELECT id FROM accounts WHERE type=? AND lower(institution)=? AND mask=? ORDER BY id",
+                                     (*SAME_MASK_TYPES, inst_key, mask) if generic else (type_, inst_key, mask)).fetchall()
             if len(same) == 1:
                 self.conn.execute("INSERT OR REPLACE INTO account_aliases (ref_hash, account_id) VALUES (?,?)", (ref, same[0]["id"]))
                 return same[0]["id"], False
+            if not generic and not same:                         # a statement that now names an account an earlier one left generic
+                earlier = self.conn.execute(f"SELECT id FROM accounts WHERE type IN ({marks}) AND lower(institution)=? AND mask=? AND name=?",
+                                            (*SAME_MASK_TYPES, inst_key, mask, f"{institution} {GENERIC_ACCOUNT_LABEL} …{mask}")).fetchall()
+                if len(earlier) == 1:
+                    self.conn.execute("UPDATE accounts SET type=?, name=? WHERE id=?",
+                                      (type_, f"{institution} {label} …{mask}" if label else f"{institution} …{mask}", earlier[0]["id"]))
+                    self.conn.execute("INSERT OR REPLACE INTO account_aliases (ref_hash, account_id) VALUES (?,?)", (ref, earlier[0]["id"]))
+                    return earlier[0]["id"], False
         name = f"{institution} {label} …{mask}" if label else f"{institution} …{mask}"
         cur = self.conn.execute(
             "INSERT INTO accounts (type, institution, name, mask, ref_hash, liability) VALUES (?,?,?,?,?,?)",

@@ -47,6 +47,9 @@ class ParsedStatement(BaseModel):
     folios: list[ParsedFolio] = Field(default_factory=list)
 
 
+GENERIC_ACCOUNT_LABEL = "Account"    # an account a statement lists but never names: read like any other, kept as its own account
+
+
 class AccountTxn(BaseModel):
     """One bank / card / PPF row. `amount` is the effect on the user's money: negative = money out."""
     date: date

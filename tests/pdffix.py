@@ -87,8 +87,10 @@ def row(date: str, amount: str | int, *, head=(), tail=(), own="", mode="", glue
 
 
 def section(label: str, ident: str, opening: str, rows: list[dict], period=("October 01, 2026", "October 31, 2026"),
-            total_bal=None) -> dict:
-    return dict(label=label, ident=ident, opening=Decimal(opening), rows=rows, period=period, total_bal=total_bal)
+            total_bal=None, summary_label: str | None = None) -> dict:
+    """`summary_label` is the kind the summary page lists the account as, when the section heading itself names none."""
+    return dict(label=label, ident=ident, opening=Decimal(opening), rows=rows, period=period, total_bal=total_bal,
+                summary_label=summary_label)
 
 
 def icici_statement(sections: list[dict], *, fds: list[dict] | None = None, fd_column: dict[str, str] | None = None, rows_per_page: int = 99,
@@ -232,9 +234,9 @@ def icici_requested_statement(sections: list[dict], *, rows_per_page: int = 99, 
     put(27, "ACCOUNT DETAILS - INR"); newline(1.6)
     put(27, "ACCOUNT TYPE"); put(181, "A/c"); put(196, "BALANCE(I)"); newline()
     for s in sections:
-        if s["label"]:
+        if s["label"] or s.get("summary_label"):
             bal = s["opening"] + sum((r["amount"] for r in s["rows"]), Decimal(0))
-            put(27, f"{s['label']} A/c {s['ident']} {inr(bal)} 0.00 {inr(bal)} Registered"); newline()
+            put(27, f"{s.get('summary_label') or s['label']} A/c {s['ident']} {inr(bal)} 0.00 {inr(bal)} Registered"); newline()
     newline(2)
     for s in sections:
         if state["y"] > 600:
