@@ -205,6 +205,7 @@ Independent reviews were done before release. The exploitable findings that coul
 - **Unattended sync** (a scheduled mail sync) cannot work while data is locked by design. Options: let a person opt in to keeping their data unlocked, or a per-profile "sync key" that can only append statements. Decide before building scheduling.
 - **Statements on disk.** Parse from memory instead of a temporary file (the compose files put `/tmp` in RAM, which covers Docker).
 - **A nonce-based Content-Security-Policy.** The templates still use inline scripts and styles, so `'unsafe-inline'` is allowed today.
+- **A real-browser smoke test in CI** (headless Chrome over the DevTools protocol: sign up, lock and unlock, sign out and in, upload, mailbox form, passkey `fetch` calls). The unit tests send the `Origin` header by hand, so they could not see that `Referrer-Policy: no-referrer` made every real form fail with "bad origin"; only a real browser showed it.
 - Secret scanning and the phone-width overflow check in CI.
 
 ### 7.10 Engineering

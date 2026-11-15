@@ -70,7 +70,7 @@ days, not hours, and no bounty.
   changing the password, **Sign out everywhere** or disabling a profile ends every cookie. HttpOnly, SameSite=Strict; on HTTPS
   Secure and named `__Host-kosh_session`. Duplicate cookies with different values are both refused.
 - **Activity log** (`data/audit.log`, mode 0600, last 1000 lines): who, what, success, address; never a secret.
-- Every response: `Cache-Control: no-store`, a Content-Security-Policy, `X-Frame-Options: DENY`, `nosniff`, `no-referrer`; HSTS on
+- Every response: `Cache-Control: no-store`, a Content-Security-Policy, `X-Frame-Options: DENY`, `nosniff`, `Referrer-Policy: same-origin` (nothing is sent to other sites; not `no-referrer`, which makes browsers send `Origin: null` on forms); HSTS on
   HTTPS. Forms must come from the same site; the app answers only to its configured hosts.
 - The installed phone app caches only its stylesheet, scripts and icons, never pages or figures.
 

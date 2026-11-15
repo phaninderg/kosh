@@ -389,7 +389,7 @@ def test_every_response_carries_security_headers_and_pages_are_never_cached(tmp_
     for path in ("/", "/login", "/account", "/transactions"):
         h = b.get(path).headers
         assert h["cache-control"] == "no-store" and h["x-content-type-options"] == "nosniff" and h["x-frame-options"] == "DENY"
-        assert h["referrer-policy"] == "no-referrer" and "frame-ancestors 'none'" in h["content-security-policy"]
+        assert h["referrer-policy"] == "same-origin"      # never no-referrer: browsers then send Origin: null on form posts and every form breaks and "frame-ancestors 'none'" in h["content-security-policy"]
         assert h["strict-transport-security"].startswith("max-age=")
     assert "no-store" not in b.get("/static/style.css").headers.get("cache-control", "")
 

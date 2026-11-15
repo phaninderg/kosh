@@ -154,7 +154,9 @@ def create_app(db_path: str = vault.VAULT_DB, jobs: JobManager | None = None, ma
     async def guard(request: Request, call_next):
         resp = await check(request, call_next)
         resp.headers["X-Content-Type-Options"] = "nosniff"
-        resp.headers["Referrer-Policy"] = "no-referrer"
+        # NOT "no-referrer": with that policy browsers send `Origin: null` on form posts, which the origin check (rightly) refuses,
+        # so no form would ever work. "same-origin" sends Origin to this site and nothing to any other site.
+        resp.headers["Referrer-Policy"] = "same-origin"
         resp.headers["X-Frame-Options"] = "DENY"
         resp.headers["Content-Security-Policy"] = CSP
         if not request.url.path.startswith("/static/") and "cache-control" not in resp.headers:
