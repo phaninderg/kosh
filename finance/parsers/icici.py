@@ -274,6 +274,14 @@ class _Parser:
 
     # ── result ────────────────────────────────────────────────────────────────
 
+    def _summary_label_for(self, identifier: str) -> str:
+        """The kind the summary page lists this account as: by its full number, else by its last four digits when that is unambiguous
+        (the list may print the number masked where the section prints it in full, or the other way round)."""
+        if identifier in self.summary_label:
+            return self.summary_label[identifier]
+        kinds = {kind for number, kind in self.summary_label.items() if number[-4:] == identifier[-4:]}
+        return kinds.pop() if len(kinds) == 1 else ""
+
     def _resolve_kinds(self) -> None:
         """Decide what every section is. A statement lists whatever accounts you hold, so nothing here is limited to the kinds
         we have seen: a section whose heading (or the summary page) names a kind we know is that kind; one that names a kind
@@ -285,7 +293,7 @@ class _Parser:
         for sec in self.sections.values():
             if sec.type is not None:
                 continue
-            label = (sec.label or self.summary_label.get(sec.identifier, "")).strip()
+            label = (sec.label or self._summary_label_for(sec.identifier)).strip()
             if label and label.lower() in ACCOUNT_TYPES:
                 sec.label, sec.type = label, ACCOUNT_TYPES[label.lower()]
             elif label:

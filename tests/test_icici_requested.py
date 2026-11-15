@@ -269,3 +269,24 @@ def test_a_generic_account_attaches_to_an_existing_account_with_its_last_digits_
                                          section("Savings", SAV, "10000.00", rows(), period=PERIOD)])
     led.import_statement(parse(unnamed, tmp_path), sha256="b" * 64)
     assert connect_ro(db_path).execute("select count(*) from accounts where mask=?", (OTHER[-4:],)).fetchone()[0] == 1
+
+
+def test_the_summary_list_names_an_account_by_full_number_or_by_its_last_four_digits_when_that_is_unambiguous():
+    from finance.parsers.icici import _Parser
+    p = _Parser()
+    p.summary_label = {"XXXXXXXX0759": "PPF", "123456789012": "Savings", "XXXXXXXX7777": "Overdraft"}
+    assert p._summary_label_for("123456789012") == "Savings"                     # exact number
+    assert p._summary_label_for("555500000759") == "PPF"                         # printed masked in the list, in full in the section
+    assert p._summary_label_for("999999999999") == ""                            # not listed
+    p.summary_label["XXXXXXXX1759"] = "Current"
+    p.summary_label["YYYYYYYY1759"] = "Salary"
+    assert p._summary_label_for("000000001759") == ""                            # two listed accounts end alike: use neither
+
+
+def test_several_rows_in_the_summary_list_name_several_sections(tmp_path):
+    pdf = icici_requested_statement([section("", "123456780759", "100.00", [row("05-04-2025", "10")], period=PERIOD, summary_label="PPF"),
+                                     section("", "123456781111", "50.00", [row("06-04-2025", "5")], period=PERIOD, summary_label="Overdraft"),
+                                     section("Savings", SAV, "10000.00", rows(), period=PERIOD)])
+    st = parse(pdf, tmp_path)
+    assert {a.identifier[-4:]: (a.type, a.label) for a in st.accounts} == {"0759": ("ppf", "PPF"), "1111": ("bank", "Overdraft"), SAV[-4:]: ("bank", "Savings")}
+    assert st.warnings == []
