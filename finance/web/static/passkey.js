@@ -34,6 +34,12 @@
   }
 
   if (!window.PublicKeyCredential) return;                       // no passkey support: the buttons stay hidden
+  const h = location.hostname;
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(h) || h.includes(':') || h.startsWith('[')) {   // an IP address: browsers refuse passkeys there
+    const where = /^(127\.|\[?::1\]?$)/.test(h) ? 'http://localhost:' + location.port : "this server's domain name, over https";
+    say('Passkeys need a domain name, not an IP address. Open Kosh at ' + where + ' to use one.');
+    return;
+  }
   document.querySelectorAll('[data-passkey]').forEach(btn => {
     btn.hidden = false;
     btn.addEventListener('click', async () => {

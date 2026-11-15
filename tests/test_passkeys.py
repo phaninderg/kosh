@@ -6,8 +6,12 @@ import time
 import pytest
 
 from finance.web import auth
+from pathlib import Path
+
 from tests.softkey import SoftKey
 from tests.test_accounts import PASSWORD, Site
+
+STATIC = Path(__file__).resolve().parent.parent / "finance" / "web" / "static"
 
 
 @pytest.fixture
@@ -173,3 +177,34 @@ def test_a_disabled_profiles_passkey_does_not_sign_in(site):
     key = SoftKey(); register(ravi, key)
     admin.post(f"/admin/users/{site.users.by_name('Ravi')['id']}/disable")
     assert sign_in(site.browser(), key).status_code == 403
+
+
+# ── passkeys need a domain name, not an IP address ────────────────────────────────────
+
+def test_on_an_ip_address_every_passkey_endpoint_explains_instead_of_failing_in_the_browser(site):
+    b, _ = site.person("Asha")
+    ip = site.browser()
+    ip.base_url = "http://127.0.0.1:8765"
+    ip.headers["origin"] = "http://127.0.0.1:8765"
+    ip.cookies.set("kosh_session", b.cookies.get("kosh_session"), domain="127.0.0.1")
+    for path, body in (("/account/passkeys/options", None), ("/auth/passkey/login/options", {})):
+        r = ip.post(path, json=body) if body is not None else ip.post(path)
+        assert r.status_code == 400 and "domain name, not an IP address" in r.json()["error"] and "http://localhost:8765" in r.json()["error"]
+    assert site.users.by_name("Asha")["passkeys"] == []
+    ok = b.post("/account/passkeys/options")                                  # the same person on a real name is fine
+    assert ok.status_code == 200
+
+
+def test_the_passkey_script_hides_its_buttons_on_an_ip_address_and_says_why():
+    js = (STATIC / "passkey.js").read_text()
+    assert "domain name, not an IP address" in js and "localhost:" in js and js.index("domain name, not an IP") < js.index("querySelectorAll('[data-passkey]')")
+
+
+def test_the_server_prints_the_localhost_address_not_the_ip(monkeypatch, capsys):
+    from finance.web import server
+    monkeypatch.setattr(server, "UI_HOST", "127.0.0.1"); monkeypatch.setattr(server, "PUBLIC_PORT", 8765)
+    monkeypatch.setattr(server.uvicorn, "run", lambda *a, **k: None)
+    monkeypatch.setattr(server.webbrowser, "open", lambda url: print("OPENED", url))
+    server.serve()
+    out = capsys.readouterr().out
+    assert "http://localhost:8765" in out and "127.0.0.1" not in out.replace("OPENED", "")

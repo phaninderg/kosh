@@ -13,6 +13,7 @@ encrypted per person:
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import secrets
 import time
@@ -67,6 +68,22 @@ def relying_party(request: Request) -> tuple[str, str]:
     """(rp id, origin) for this request. The Host header was already checked against the allowed hosts."""
     host = request.headers["host"].lower()
     return host.rsplit(":", 1)[0] if not host.startswith("[") else host.split("]")[0] + "]", f"{request.url.scheme}://{host}"
+
+
+def host_is_ip(request: Request) -> bool:
+    """Browsers refuse passkeys on an IP address: a passkey belongs to a domain name (localhost counts)."""
+    host = request.headers.get("host", "").lower()
+    name = host.split("]")[0].lstrip("[") if host.startswith("[") else host.rsplit(":", 1)[0]
+    try:
+        ipaddress.ip_address(name)
+    except ValueError:
+        return False
+    return True
+
+
+def ip_problem(request: Request) -> JSONResponse:
+    where = "http://localhost:" + request.headers["host"].rsplit(":", 1)[-1] if request.headers.get("host", "").startswith(("127.", "[::1]")) else "your server's domain name over https"
+    return JSONResponse({"error": f"Passkeys need a domain name, not an IP address. Open Kosh at {where} and try again."}, status_code=400)
 
 
 def register(app, env: SimpleNamespace) -> None:
@@ -319,6 +336,8 @@ def register(app, env: SimpleNamespace) -> None:
         return [PublicKeyCredentialDescriptor(id=base64url_to_bytes(pk["id"])) for pk in user["passkeys"]]
 
     def creation_options(request: Request, user: dict, kind: str, **extra):
+        if host_is_ip(request):
+            return ip_problem(request)
         rp_id, _ = relying_party(request)
         options = generate_registration_options(
             rp_id=rp_id, rp_name="Kosh", user_id=user["id"].encode(), user_name=user["name"], user_display_name=user["name"],
@@ -386,6 +405,8 @@ def register(app, env: SimpleNamespace) -> None:
 
     @app.post("/auth/passkey/login/options")
     async def passkey_login_options(request: Request):
+        if host_is_ip(request):
+            return ip_problem(request)
         rp_id, _ = relying_party(request)
         options = generate_authentication_options(rp_id=rp_id, user_verification=UserVerificationRequirement.REQUIRED, allow_credentials=[])
         return JSONResponse({"cid": challenges.put("login", options.challenge, client(request)), "options": options_to_json_dict(options)})

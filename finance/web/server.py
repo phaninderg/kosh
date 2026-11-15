@@ -19,7 +19,7 @@ TRUSTED_PROXIES = "127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 
 def serve() -> None:
     users = users_mod.Users()
-    shown = "localhost" if UI_HOST == "0.0.0.0" else UI_HOST
+    shown = "localhost" if UI_HOST in ("0.0.0.0", "127.0.0.1", "::1") else UI_HOST      # passkeys need a name, not an IP address
     base = f"https://{ALLOWED_HOSTS[0]}" if ALLOWED_HOSTS else f"http://{shown}:{PUBLIC_PORT}"
     setup_code = users.new_setup_code()                   # None once someone has signed up
     print(f"\nKosh is running at {base}", flush=True)
