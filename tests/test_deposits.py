@@ -7,7 +7,7 @@ import pytest
 
 from finance import analytics
 from finance.db import connect_ro
-from finance.ledger import Ledger
+from finance.ledger import PARSE_REVISION, Ledger
 from finance.models import ParsedAccount, ParsedAccountStatement, ParsedDeposit
 from finance.parsers.icici import IciciStatementParser
 from tests.pdffix import icici_statement, row, section
@@ -123,3 +123,22 @@ def test_the_accounts_page_marks_closed_and_matured_deposits(client, led, db_pat
     authed(client)
     page = client.get("/accounts").text
     assert "closed: not in the 2026-11-30 statement" in page
+
+
+def test_a_file_read_by_an_older_parser_revision_is_read_again_and_a_current_one_is_still_a_duplicate(db_path):
+    first = Ledger(db_path)
+    stmt = statement(date(2026, 10, 31), [1])
+    assert first.import_account_statement(stmt, sha256="abc").status == "imported"
+    assert first.import_account_statement(stmt, sha256="abc").status == "duplicate"        # same revision: nothing to gain
+
+    stale = ParsedAccount(type="ppf", label="PPF", institution="ICICI Bank", identifier="123456780759", period_from=date(2026, 10, 1),
+                          period_to=date(2026, 10, 31), opening_balance=Decimal("0"), closing_balance=Decimal("0"), txns=[])
+    with first.conn:
+        first.conn.execute("UPDATE source_documents SET parse_rev=1")                      # as if an older version had read it
+    stmt.accounts.append(stale)                                                            # what the newer parser finds in the same file
+    again = first.import_account_statement(stmt, sha256="abc")
+    assert again.status == "imported"
+    assert [r["type"] for r in first.conn.execute("SELECT type FROM accounts ORDER BY type")] == ["bank", "ppf"]
+    assert first.conn.execute("SELECT COUNT(*), MIN(parse_rev) FROM source_documents").fetchone()[:] == (1, PARSE_REVISION)
+    assert first.import_account_statement(stmt, sha256="abc").status == "duplicate"        # and now it is current
+    first.close()

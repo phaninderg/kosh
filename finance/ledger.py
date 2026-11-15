@@ -21,6 +21,10 @@ from finance.models import (GENERIC_ACCOUNT_LABEL, ImportResult, ParsedAccount, 
 UNITS_TOLERANCE = Decimal("0.001")
 UNKNOWN_AMC = {"", "n/a", "na", "unknown", "none"}      # casparser reports "N/A" for summary statements
 PLACEHOLDER_AMC = "Unknown fund house"
+# Bump when a parser change can find more in a file it already read (a new account kind, a row it used to drop): files
+# imported under an older revision are read again, once, the next time they are imported.
+PARSE_REVISION = 2
+
 SAME_MASK_TYPES = ("bank", "ppf")                    # accounts one statement masks and another prints in full
 
 # Email/attachment details stored with each document (subject and filename arrive already masked).
@@ -54,15 +58,19 @@ class Ledger:
     # ── statements ────────────────────────────────────────────────────────────
 
     def _dedupe_document(self, sha256: str, message_id: str, meta: dict | None):
-        """(early result, meta, picked_up). A known, finished document is a duplicate; one that failed or awaited
-        attention is cleared so the retry can import it, keeping its original pickup time and email details."""
+        """(early result, meta, picked_up, reread_id). A known, finished document is a duplicate, unless it was read by an
+        older revision of the parsers: then it is read again into the same document row (what was already stored is
+        recognised by its keys, so only what the older reading missed is added). One that failed or awaited attention is
+        cleared so the retry can import it, keeping its original pickup time and email details."""
         existing = self.conn.execute(
             "SELECT * FROM source_documents WHERE message_id=? AND sha256=?", (message_id, sha256)
         ).fetchone()
         meta = dict(meta or {})
         if existing and existing["status"] not in ("failed", "needs_attention"):
+            if existing["parse_rev"] < PARSE_REVISION:
+                return None, meta, existing["picked_up_at"], existing["id"]
             self.fill_missing_meta(existing["id"], meta)
-            return ImportResult(status="duplicate", doc_id=existing["id"]), meta, None
+            return ImportResult(status="duplicate", doc_id=existing["id"]), meta, None, None
         picked_up = None
         if existing:                                     # earlier attempt failed / awaited attention: retry
             picked_up = existing["picked_up_at"]
@@ -74,20 +82,26 @@ class Ledger:
                 self.conn.execute(
                     "UPDATE review_queue SET status='resolved', resolved_at=datetime('now') "
                     "WHERE kind='needs_attention' AND ref=?", (f"doc:{existing['id']}",))
-        return None, meta, picked_up
+        return None, meta, picked_up, None
 
     def _insert_document(self, stmt, sha256: str, source: str, message_id: str, sender: str,
-                         meta: dict, picked_up: str | None) -> int:
+                         meta: dict, picked_up: str | None, reread_id: int | None = None) -> int:
+        if reread_id:
+            self.conn.execute("UPDATE source_documents SET parser=?, status='imported', error='', period_from=?, period_to=?, "
+                              "parse_rev=?, processed_at=datetime('now') WHERE id=?",
+                              (stmt.parser, stmt.period_from and stmt.period_from.isoformat(),
+                               stmt.period_to and stmt.period_to.isoformat(), PARSE_REVISION, reread_id))
+            return reread_id
         cur = self.conn.execute(
             "INSERT INTO source_documents (source, message_id, sha256, parser, status, period_from, period_to, "
-            "sender, account, folder, uid, received_at, subject, filename, size, auth, picked_up_at, processed_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, COALESCE(?, datetime('now')), datetime('now'))",
+            "sender, account, folder, uid, received_at, subject, filename, size, auth, picked_up_at, processed_at, parse_rev) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, COALESCE(?, datetime('now')), datetime('now'), ?)",
             (source, message_id, sha256, stmt.parser, "imported",
              stmt.period_from and stmt.period_from.isoformat(),
              stmt.period_to and stmt.period_to.isoformat(), sender,
              meta.get("account", ""), meta.get("folder", ""), meta.get("uid", 0), meta.get("received_at"),
              meta.get("subject", ""), meta.get("filename", ""), meta.get("size", 0), meta.get("auth", ""),
-             picked_up),
+             picked_up, PARSE_REVISION),
         )
         return cur.lastrowid
 
@@ -98,13 +112,13 @@ class Ledger:
         if isinstance(stmt, ParsedAccountStatement):
             return self.import_account_statement(stmt, sha256=sha256, source=source, message_id=message_id,
                                                  sender=sender, meta=meta, redactor=redactor)
-        early, meta, picked_up = self._dedupe_document(sha256, message_id, meta)
+        early, meta, picked_up, reread_id = self._dedupe_document(sha256, message_id, meta)
         if early:
             return early
 
         result = ImportResult(status="imported", warnings=list(stmt.warnings))
         with self.conn:                                  # one transaction: all or nothing
-            doc_id = result.doc_id = self._insert_document(stmt, sha256, source, message_id, sender, meta, picked_up)
+            doc_id = result.doc_id = self._insert_document(stmt, sha256, source, message_id, sender, meta, picked_up, reread_id)
 
             as_of = (stmt.period_to or max(
                 (s.valuation_date for f in stmt.folios for s in f.schemes), default=None))
@@ -155,13 +169,13 @@ class Ledger:
             errs = acct.integrity_errors()
             if errs:
                 raise ValueError(f"{acct.label or acct.type} account …{last4(acct.identifier)}: {errs[0]}")
-        early, meta, picked_up = self._dedupe_document(sha256, message_id, meta)
+        early, meta, picked_up, reread_id = self._dedupe_document(sha256, message_id, meta)
         if early:
             return early
 
         result = ImportResult(status="imported", warnings=list(stmt.warnings))
         with self.conn:
-            doc_id = result.doc_id = self._insert_document(stmt, sha256, source, message_id, sender, meta, picked_up)
+            doc_id = result.doc_id = self._insert_document(stmt, sha256, source, message_id, sender, meta, picked_up, reread_id)
             ids: dict[str, int] = {}
             for acct in stmt.accounts:
                 acct_id, _ = self._upsert_account(

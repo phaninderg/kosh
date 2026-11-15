@@ -7,7 +7,7 @@ from pathlib import Path
 
 from finance import vault
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS accounts (
@@ -183,6 +183,9 @@ MIGRATIONS: dict[int, str] = {
     """,
     7: """
     ALTER TABLE statement_summaries ADD COLUMN amount_due TEXT;   -- what to pay by the due date (can be below total_due, which is the outstanding balance)
+    """,
+    8: """
+    ALTER TABLE source_documents ADD COLUMN parse_rev INTEGER NOT NULL DEFAULT 1;   -- which reading of the parsers produced this import (see ledger.PARSE_REVISION)
     """,
 }
 
