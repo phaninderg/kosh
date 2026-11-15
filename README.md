@@ -33,6 +33,20 @@ What I wanted from it, beyond a net-worth number:
 
 *Screenshots use invented demo data.*
 
+### What it can read today
+
+Kosh only understands the PDF formats below. Anything else is refused with a message rather than guessed at.
+
+| Kind | Supported | Not supported yet |
+|---|---|---|
+| **Bank** | ICICI Bank statements: the monthly emailed one and the "Statement of Transactions" you request for any period. Every account the statement lists is read and checked against its own transactions (savings, PPF, and any other kind, each as its own account), plus the linked fixed deposits | Recurring deposits as their own product; every other bank |
+| **Credit cards** | ICICI, HDFC, Axis and Tata Neu card statements | Every other issuer; EMI conversions are not broken out |
+| **Mutual funds** | Detailed consolidated account statements (CAS) from CAMS, KFintech and MF Central | NSDL / CDSL demat statements, stocks |
+| **NPS** | Transaction statements (monthly, annual, and the ones downloaded from the NPS portal), Tier I | Tier II (the parser has a synthetic test for it but has never seen a real statement), Atal Pension Yojana |
+| **Other assets** | | EPF, PPF at other banks or the Post Office, loans, insurance, gold, real estate |
+
+The [ROADMAP](ROADMAP.md) lists what is pending, so you can see whether yours is on it or add it. Dummy PDFs for every supported layout are in `samples/`.
+
 ## Quick start
 
 **Prerequisites:** Python 3.10+ (developed on 3.14).
