@@ -470,3 +470,41 @@ def test_type_options_only_list_kinds_of_the_chosen_account(db_path, stmt, tmp_p
     assert set(analytics.txn_kinds(conn, "card")) == {"DEBIT", "CREDIT"}
     assert "PAYMENT" not in analytics.txn_kinds(conn, "bank") and "CREDIT" in analytics.txn_kinds(conn, "bank")
     assert set(analytics.txn_kinds(conn)) >= {"DEBIT", "CREDIT"}
+
+
+# ── fixed deposits: read every row, or say that one was missed ──────────────────────────
+
+def _fd_statement(*fd_lines, fd_in_summary=None):
+    return icici_statement([section("Savings", SAV, "1000.00", [row("02-10-2026", "-100")])],
+                           fds=[dict(linked=SAV, text=t) for t in fd_lines])
+
+
+@pytest.mark.parametrize("tenure", ["12 Mths 0 Days", "6 Mths", "400 Days", "1 Yrs 6 Mths", "2 Years", "1 Yrs 0 Mths 15 Days"])
+def test_a_deposit_is_read_whatever_form_its_tenure_is_printed_in(tmp_path, tenure):
+    line = f"900000000009 05-03-2026 50,000.00 7.10 {tenure} 53,400.00 05-03-2027 50,000.00 Not Registered"
+    st = parse(_fd_statement(line), tmp_path)
+    (d,) = st.deposits
+    assert d.tenure == tenure and d.rate == Decimal("7.10") and d.principal == Decimal("50000.00") and st.warnings == []
+
+
+def test_three_deposits_are_three_deposits(tmp_path):
+    lines = [f"90000000000{i} 05-03-2026 {i}0,000.00 6.75 12 Mths 0 Days 5{i},400.00 05-03-2027 {i}0,000.00 Registered" for i in (1, 2, 3)]
+    assert [d.number[-1] for d in parse(_fd_statement(*lines), tmp_path).deposits] == ["1", "2", "3"]
+
+
+def test_a_row_that_looks_like_a_deposit_but_cannot_be_read_is_reported_never_skipped_silently(tmp_path):
+    good = "900000000001 05-03-2026 50,000.00 6.75 12 Mths 0 Days 53,400.00 05-03-2027 50,000.00 Registered"
+    odd = "900000000002 05-03-2026 40,000.00 an unexpected layout of this one row"
+    st = parse(_fd_statement(good, odd), tmp_path)
+    assert [d.number[-1] for d in st.deposits] == ["1"]
+    (w,) = st.warnings
+    assert "…0002" in w and "could not be read" not in w and "cannot read" in w and "not imported" in w
+    assert "40,000" not in w                                                    # the warning never repeats the figures
+
+
+def test_the_summary_pages_linked_deposit_column_is_read(tmp_path):
+    from finance.parsers.icici import _SUMMARY_ROW
+    m = _SUMMARY_ROW.match("Savings A/c 123456789012 9,99,999.99 1,50,000.00 11,49,999.99 Registered")
+    assert (m.group("bal"), m.group("fd"), m.group("total")) == ("9,99,999.99", "1,50,000.00", "11,49,999.99")
+    m = _SUMMARY_ROW.match("Savings A/c XXXXXXXX1234 300,000.00 Registered")      # the older layout has one amount
+    assert m.group("bal") == "300,000.00" and m.group("fd") is None

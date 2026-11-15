@@ -255,7 +255,8 @@ def create_app(db_path: str = vault.VAULT_DB, jobs: JobManager | None = None, ma
             nps = analytics.nps_overview(conn)
         finally:
             conn.close()
-        return render(request, "accounts.html", page="accounts", flow=flow, card_flow=card_flow, nps=nps, **overview)
+        return render(request, "accounts.html", page="accounts", flow=flow, card_flow=card_flow, nps=nps,
+                      today=today().isoformat(), **overview)
 
     # ── import ────────────────────────────────────────────────────────────────
 

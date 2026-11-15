@@ -118,6 +118,11 @@ class ParsedAccountStatement(BaseModel):
     period_to: date | None = None
     accounts: list[ParsedAccount] = Field(default_factory=list)
     deposits: list[ParsedDeposit] = Field(default_factory=list)
+    # What the statement says it holds in linked fixed deposits, per account number (None of this is stored). When an account is
+    # here and every deposit row was read (`fd_complete`), a deposit this statement no longer lists has been closed.
+    fd_summary: dict[str, Decimal] = Field(default_factory=dict)
+    fd_complete: bool = True
+    as_of: date | None = None
     warnings: list[str] = Field(default_factory=list)
 
 

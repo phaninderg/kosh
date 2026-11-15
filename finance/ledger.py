@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections import Counter
+from datetime import date
 from pathlib import Path
 import time
 from decimal import Decimal
@@ -183,6 +184,11 @@ class Ledger:
                          dec_str(acct.amount_due if acct.amount_due is not None else -acct.closing_balance)))
             for dep in stmt.deposits:
                 self._write_deposit(dep, ids.get(dep.linked_account), doc_id)
+            if stmt.fd_complete and stmt.as_of:                      # a statement that states an account's linked deposits, and was read in full
+                for ident in stmt.fd_summary:
+                    if ident in ids:
+                        listed = {keyed_hash("fd", d.institution.lower(), d.number) for d in stmt.deposits if d.linked_account == ident}
+                        self._close_unlisted_deposits(ids[ident], listed, stmt.as_of, doc_id)
             self.conn.execute("UPDATE source_documents SET txn_new=?, txn_dup=? WHERE id=?",
                               (result.txn_new, result.txn_dup, doc_id))
         self.merge_same_account_spellings()
@@ -223,6 +229,23 @@ class Ledger:
              dep.open_date and dep.open_date.isoformat(), dec_str(dep.principal), dec_str(dep.rate), dep.tenure,
              dep.maturity_date and dep.maturity_date.isoformat(), dec_str(dep.maturity_amount),
              dec_str(dep.current_balance), dep.status, dep.as_of.isoformat(), doc_id))
+
+    def _close_unlisted_deposits(self, account_id: int, listed: set[str], as_of: date, doc_id: int) -> None:
+        """A deposit this account had at its last statement and that a newer statement no longer lists has been closed or
+        has matured and been paid out: record that as a closing snapshot, so it stops counting towards net worth. Older
+        statements never close anything, and the deposit's history stays."""
+        rows = self.conn.execute(
+            "SELECT * FROM fixed_deposits f WHERE f.linked_account_id=? AND f.status != 'Closed' AND f.as_of < ? "
+            "AND f.as_of = (SELECT MAX(as_of) FROM fixed_deposits x WHERE x.ref_hash = f.ref_hash)",
+            (account_id, as_of.isoformat())).fetchall()
+        for r in rows:
+            if r["ref_hash"] not in listed:
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO fixed_deposits (institution, ref_hash, mask, linked_account_id, open_date, principal, rate, "
+                    "tenure, maturity_date, maturity_amount, current_balance, status, as_of, doc_id) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (r["institution"], r["ref_hash"], r["mask"], r["linked_account_id"], r["open_date"], r["principal"], r["rate"],
+                     r["tenure"], r["maturity_date"], r["maturity_amount"], "0", "Closed", as_of.isoformat(), doc_id))
 
     def link_transfer(self, txn_out: int, txn_in: int, method: str, confidence: str) -> bool:
         """Record that two transactions are the two legs of one transfer (not an expense, not income)."""

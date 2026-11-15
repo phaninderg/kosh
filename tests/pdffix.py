@@ -91,7 +91,7 @@ def section(label: str, ident: str, opening: str, rows: list[dict], period=("Oct
     return dict(label=label, ident=ident, opening=Decimal(opening), rows=rows, period=period, total_bal=total_bal)
 
 
-def icici_statement(sections: list[dict], *, fds: list[dict] | None = None, rows_per_page: int = 99,
+def icici_statement(sections: list[dict], *, fds: list[dict] | None = None, fd_column: dict[str, str] | None = None, rows_per_page: int = 99,
                     total_dep_error: str | None = None) -> bytes:
     """Lay out sections one after another, breaking pages (with a Total row and a repeated header) every
     `rows_per_page` rows or when the page is full."""
@@ -116,7 +116,8 @@ def icici_statement(sections: list[dict], *, fds: list[dict] | None = None, rows
         for r in s["rows"]:
             bal += r["amount"]
         closing[s["ident"]] = bal
-        put(37, f"{s['label']} A/c {s['ident']} {inr(bal)} Registered"); newline()
+        fd = (fd_column or {}).get(s["ident"])                      # the summary's linked-deposit column, when the layout has one
+        put(37, f"{s['label']} A/c {s['ident']} {inr(bal)} " + (f"{fd} {inr(bal + Decimal(fd.replace(',', '')))} " if fd else "") + "Registered"); newline()
     if fds:
         newline()
         put(37, "FIXED DEPOSITS LINKED TO ACCOUNT - INR"); newline()

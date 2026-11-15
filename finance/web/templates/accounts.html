@@ -17,7 +17,7 @@
 <p class="mute">As of {{ nps.as_of }}, from your NPS statements. The return is for the whole NPS account, not per scheme: money in is every contribution (yours and your employer's) and the value is what the schemes you hold are worth now. Moving units between schemes and charges are not cash flows (charges already lower the value).</p>{% endif %}
 {% if deposits %}<h2>Fixed deposits</h2>
 <div class="card wrap"><table><tr><th>Deposit</th><th>Opened</th><th class="n">Principal</th><th class="n">Rate %</th><th>Tenure</th><th>Matures</th><th class="n">Maturity amount</th><th class="n">Current balance</th><th>As of</th></tr>
-{% for d in deposits %}<tr><td>{{ d.institution }} …{{ d.mask }}{% if d.linked_mask %}<div class="mute">linked to …{{ d.linked_mask }}</div>{% endif %}</td><td>{{ d.open_date }}</td>
+{% for d in deposits %}<tr><td>{{ d.institution }} …{{ d.mask }}{% if d.linked_mask %}<div class="mute">linked to …{{ d.linked_mask }}</div>{% endif %}{% if d.status == 'Closed' %}<div class="mute">closed: not in the {{ d.as_of }} statement</div>{% elif d.maturity_date and d.maturity_date < today %}<div class="mute">matured {{ d.maturity_date }}: import a newer statement to confirm</div>{% endif %}</td><td>{{ d.open_date }}</td>
 <td class="n">{{ d.principal|inr(2) }}</td><td class="n">{{ d.rate }}</td><td>{{ d.tenure }}</td><td>{{ d.maturity_date }}</td><td class="n">{{ d.maturity_amount|inr(2) }}</td><td class="n">{{ d.current_balance|inr(2) }}</td><td>{{ d.as_of }}</td></tr>{% endfor %}</table></div>
 <p class="mute">Current balance is the deposit plus interest up to the previous financial year, as the bank reports it.</p>{% endif %}
 {% if flow %}<h2>Bank balance by month</h2>

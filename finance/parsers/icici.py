@@ -33,13 +33,16 @@ _DATE = re.compile(r"^(\d{2}-\d{2}-\d{4})(.*)$")
 _AMOUNT = re.compile(r"^\d[\d,]*\.\d{2}$")
 _SECTION = re.compile(r"^Statement of Transactions in (?:(?P<label>.+?) )?Account (?:Number: )?(?P<id>\S+) in INR for the period "
                       r"(?P<from>[A-Za-z]+ \d{1,2}, \d{4}) - (?P<to>[A-Za-z]+ \d{1,2}, \d{4})$")
-_SUMMARY_ROW = re.compile(r"^(?P<label>[A-Za-z][A-Za-z ]*?) A/c (?P<id>\S+) (?P<bal>\d[\d,]*\.\d{2})\b")
+_SUMMARY_ROW = re.compile(r"^(?P<label>[A-Za-z][A-Za-z ]*?) A/c (?P<id>\S+) (?P<bal>\d[\d,]*\.\d{2})"
+                          r"(?: (?P<fd>\d[\d,]*\.\d{2}) (?P<total>\d[\d,]*\.\d{2}))?\b")
 _AS_ON = re.compile(r"Statement summary for Customer ID \S+ as on (?P<d>[A-Za-z]+ \d{1,2}, \d{4})")
 _FD_LINKED = re.compile(r"DEPOSITS LINKED TO ACCOUNT No\. (?P<id>\S+)")
 _FD_ROW = re.compile(
     r"^(?P<num>\d{6,}) (?P<open>\d{2}-\d{2}-\d{4}) (?P<principal>\d[\d,]*\.\d{2}) (?P<rate>\d+(?:\.\d+)?) "
-    r"(?P<tenure>\d+ Mths(?: \d+ Days)?) (?P<maturity_amt>\d[\d,]*\.\d{2}) (?P<maturity>\d{2}-\d{2}-\d{4}) "
-    r"(?P<balance>\d[\d,]*\.\d{2}) (?P<status>[A-Za-z][A-Za-z ]*)$")
+    r"(?P<tenure>\d+ (?:Yrs?|Years?|Mths?|Months?|Days?)(?: \d+ (?:Yrs?|Years?|Mths?|Months?|Days?))*) "
+    r"(?P<maturity_amt>\d[\d,]*\.\d{2}) (?P<maturity>\d{2}-\d{2}-\d{4}) "
+    r"(?P<balance>\d[\d,]*\.\d{2}) (?P<status>[A-Za-z][A-Za-z /&\-]*)$")
+_FD_LOOKS_LIKE_ONE = re.compile(r"^(?P<num>\d{6,}) \d{2}-\d{2}-\d{4} \d[\d,]*\.\d{2}\b")       # starts like a deposit row
 _SR = re.compile(r"(?<![A-Za-z])SR\d{6,}")
 _RRN = re.compile(r"/(\d{12})(?:/|$|\s)")
 
@@ -117,6 +120,8 @@ class _Parser:
         self.as_of: date | None = None
         self.fd_linked = ""
         self.fd_rows: list[tuple[str, re.Match]] = []
+        self.summary_fd: dict[str, Decimal] = {}            # per account: the linked-FD balance the summary page prints
+        self.fd_unreadable = 0                              # deposit-looking rows that could not be read
         self.warnings: list[str] = []
         self.page = 0
         self.skip_page_top = False        # inside a section at the start of a page: ignore lines until the header repeats
@@ -167,9 +172,8 @@ class _Parser:
         ident, label = m.group("id"), m.group("label") or ""
         if ident not in self.sections:
             self.sections[ident] = _Section(label, ident, _long_day(m.group("from")), _long_day(m.group("to")))
-            if self.sections[ident].type is None:
-                what = f"{label} account" if label else "An account whose type the statement does not name"
-                self.warnings.append(f"{what} …{ident[-4:]}: this account type is not supported yet, its transactions "
+            if self.sections[ident].type is None and label:
+                self.warnings.append(f"{label} account …{ident[-4:]}: this account type is not supported yet, its transactions "
                                      f"were not imported.")
         self.cur = self.sections[ident]
 
@@ -178,10 +182,16 @@ class _Parser:
             self.as_of = _long_day(m.group("d"))
         if (m := _SUMMARY_ROW.match(text)):
             self.summary[m.group("id")] = _num(m.group("bal"))
+            if m.group("fd"):
+                self.summary_fd[m.group("id")] = _num(m.group("fd"))
         if (m := _FD_LINKED.search(text)):
             self.fd_linked = m.group("id")
         if (m := _FD_ROW.match(text)):
             self.fd_rows.append((self.fd_linked, m))
+        elif (m := _FD_LOOKS_LIKE_ONE.match(text)):         # never skip a deposit silently
+            self.fd_unreadable += 1
+            self.warnings.append(f"A fixed deposit row (…{m.group('num')[-4:]}) is in a layout this version cannot read, so that "
+                                 f"deposit was not imported.")
         if re.search(r"RECURRING DEPOSIT", text, re.I) and not any("ecurring" in w for w in self.warnings):
             self.warnings.append("Recurring deposits appear on this statement but are not imported yet.")
 
@@ -255,9 +265,25 @@ class _Parser:
 
     # ── result ────────────────────────────────────────────────────────────────
 
+    def _name_unnamed_accounts(self) -> None:
+        """A statement you request lists every account but may name only the savings one. A transfer between your own accounts
+        carries the same SR id on both legs, and the savings leg says "TO PPF": so an unnamed account that holds the other leg
+        of such a transfer is that PPF account. With no such evidence it is left out, and the warning says why."""
+        ppf_legs = {t.reference for s in self.sections.values() if s.type == "bank" for t in s.txns
+                    if t.reference.startswith("SR") and re.search(r"\bPPF\b", t.description, re.I)}
+        for sec in self.sections.values():
+            if sec.type is not None or sec.label:
+                continue
+            if any(t.reference in ppf_legs for t in sec.txns):
+                sec.type, sec.label = "ppf", "PPF"
+            else:
+                self.warnings.append(f"An account …{sec.identifier[-4:]} whose type the statement does not name was not imported: nothing "
+                                     f"in this statement shows what it is. A monthly statement names it, so import one of those.")
+
     def result(self) -> ParsedAccountStatement:
         if self.chunk is not None:
             raise ValueError("a transaction table ended without its Total row; layout not recognised")
+        self._name_unnamed_accounts()
         accounts: list[ParsedAccount] = []
         for sec in self.sections.values():
             if sec.type is None:
@@ -287,7 +313,9 @@ class _Parser:
         return ParsedAccountStatement(
             parser=IciciStatementParser.name,
             period_from=min(a.period_from for a in accounts), period_to=max(a.period_to for a in accounts),
-            accounts=accounts, deposits=deposits, warnings=self.warnings)
+            accounts=accounts, deposits=deposits, warnings=self.warnings, as_of=as_of,
+            fd_summary={k: v for k, v in self.summary_fd.items() if any(a.identifier == k for a in accounts)},
+            fd_complete=self.fd_unreadable == 0)
 
 
 def parse_pages(pages: list[list[Word]]) -> ParsedAccountStatement:

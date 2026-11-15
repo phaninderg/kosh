@@ -91,7 +91,51 @@ def test_an_account_whose_type_the_statement_does_not_name_is_skipped_with_a_war
                                      section("Savings", SAV, "10000.00", rows(), period=PERIOD)])
     st = parse(pdf, tmp_path)
     assert [a.identifier for a in st.accounts] == [SAV]
-    assert any("type the statement does not name" in w and OTHER[-4:] in w for w in st.warnings)
+    assert any("does not name" in w and OTHER[-4:] in w for w in st.warnings)
+
+
+def _with_ppf_transfers(ppf_ref="SR123456789", unnamed=True):
+    """Savings rows that say TO PPF, and the unnamed account that receives them (the other leg carries the same SR id)."""
+    savings = rows(2) + [row("12-04-2025", "-5000", own="TO PPF 004000000000_SR123456789"),
+                         row("13-04-2025", "-3000", own="TO PPF 004000000000_SR222222222")]
+    ppf = [row("12-04-2025", "5000", own=f"FRM SB 236000000000_{ppf_ref}"), row("30-04-2025", "700", own="INT.PD:01-01-2025 to 31-03-2025")]
+    return icici_requested_statement([section("" if unnamed else "PPF", OTHER, "100000.00", ppf, period=PERIOD),
+                                      section("Savings", SAV, "10000.00", savings, period=PERIOD)])
+
+
+def test_an_unnamed_account_that_receives_a_to_ppf_transfer_is_the_ppf_account(tmp_path):
+    st = parse(_with_ppf_transfers(), tmp_path)
+    by_id = {a.identifier: a for a in st.accounts}
+    assert set(by_id) == {SAV, OTHER} and st.warnings == []
+    ppf = by_id[OTHER]
+    assert (ppf.type, ppf.label) == ("ppf", "PPF") and ppf.integrity_errors() == []
+    assert [t.amount for t in ppf.txns] == [Decimal("5000"), Decimal("700")] and ppf.closing_balance == Decimal("105700")
+    assert by_id[SAV].type == "bank"
+
+
+def test_an_unnamed_account_with_no_matching_transfer_is_left_out_and_the_warning_says_why(tmp_path):
+    st = parse(_with_ppf_transfers(ppf_ref="SR999999999"), tmp_path)                 # the SR id matches no "TO PPF" row
+    assert [a.identifier for a in st.accounts] == [SAV]
+    (w,) = st.warnings
+    assert OTHER[-4:] in w and "does not name" in w and "monthly statement" in w
+
+
+def test_a_transfer_that_does_not_mention_ppf_never_names_an_account(tmp_path):
+    savings = rows(2) + [row("12-04-2025", "-5000", own="TO SB 004000000000_SR123456789")]
+    ppf = [row("12-04-2025", "5000", own="FRM SB 236000000000_SR123456789")]
+    st = parse(icici_requested_statement([section("", OTHER, "100.00", ppf, period=PERIOD),
+                                          section("Savings", SAV, "10000.00", savings, period=PERIOD)]), tmp_path)
+    assert [a.identifier for a in st.accounts] == [SAV] and len(st.warnings) == 1
+
+
+def test_a_ppf_named_from_the_transfers_joins_the_ppf_account_from_the_monthly_statements(db_path, tmp_path):
+    from finance.db import connect_ro
+    led = Ledger(db_path)
+    monthly = icici_statement([section("PPF", "XXXXXXXX" + OTHER[-4:], "100000.00", [row("15-04-2025", "5000", own="FRM SB 236000000000_SR123456789")])])
+    led.import_statement(parse(monthly, tmp_path), sha256="a" * 64)
+    led.import_statement(parse(_with_ppf_transfers(), tmp_path), sha256="b" * 64)
+    conn = connect_ro(db_path)
+    assert conn.execute("select count(*) from accounts where type='ppf'").fetchone()[0] == 1              # one PPF account, not two
 
 
 def test_a_second_section_after_the_first_total_is_read_too(tmp_path):
